@@ -14,7 +14,14 @@ type Config struct {
 
 	// EndpointPricing maps URL patterns to pricing rules
 	// Patterns support exact matches ("/v1/endpoint") and wildcards ("/v1/*")
+	// Used by HTTP middleware (grpc-gateway)
 	EndpointPricing map[string]PricingRule
+
+	// MethodPricing maps gRPC method names to pricing rules
+	// Methods are full names like "/package.Service/Method"
+	// Supports wildcards: "/package.Service/*" matches all methods in a service
+	// Used by native gRPC interceptors
+	MethodPricing map[string]PricingRule
 
 	// DefaultPricing is used when no pattern matches (optional)
 	// If nil, unmatched endpoints don't require payment
@@ -27,6 +34,10 @@ type Config struct {
 	// SkipPaths lists paths that should bypass payment checks entirely
 	// Useful for health checks, public endpoints, etc.
 	SkipPaths []string
+
+	// SkipMethods lists gRPC methods that should bypass payment checks
+	// Full method names like "/package.Service/Method"
+	SkipMethods []string
 
 	// CustomPaywallHTML is custom HTML to return for browser requests (optional)
 	// If empty, a JSON 402 response is returned for all clients
@@ -87,6 +98,12 @@ func (c *Config) Validate() error {
 	for pattern, rule := range c.EndpointPricing {
 		if err := rule.Validate(); err != nil {
 			return fmt.Errorf("invalid pricing rule for pattern %q: %w", pattern, err)
+		}
+	}
+
+	for method, rule := range c.MethodPricing {
+		if err := rule.Validate(); err != nil {
+			return fmt.Errorf("invalid pricing rule for method %q: %w", method, err)
 		}
 	}
 
@@ -161,6 +178,48 @@ func (c *Config) MatchEndpoint(requestPath string) (*PricingRule, bool) {
 
 	for pattern, rule := range c.EndpointPricing {
 		if matchPath(requestPath, pattern) {
+			if len(pattern) > len(bestMatch) {
+				bestMatch = pattern
+				ruleCopy := rule
+				bestRule = &ruleCopy
+			}
+		}
+	}
+
+	if bestRule != nil {
+		return bestRule, true
+	}
+
+	// Finally, use default if configured
+	if c.DefaultPricing != nil {
+		return c.DefaultPricing, true
+	}
+
+	return nil, false
+}
+
+// MatchMethod finds the pricing rule for a given gRPC method
+// Returns the rule and true if found, nil and false otherwise
+func (c *Config) MatchMethod(fullMethod string) (*PricingRule, bool) {
+	// Check if method should be skipped
+	for _, skipMethod := range c.SkipMethods {
+		if matchPath(fullMethod, skipMethod) {
+			return nil, false
+		}
+	}
+
+	// First try exact matches
+	if rule, ok := c.MethodPricing[fullMethod]; ok {
+		return &rule, true
+	}
+
+	// Then try wildcard matches
+	// Sort by specificity (longer patterns first)
+	var bestMatch string
+	var bestRule *PricingRule
+
+	for pattern, rule := range c.MethodPricing {
+		if matchPath(fullMethod, pattern) {
 			if len(pattern) > len(bestMatch) {
 				bestMatch = pattern
 				ruleCopy := rule

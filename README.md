@@ -1,21 +1,75 @@
 # grpc-gateway-x402
 
-Payment middleware for grpc-gateway that implements the [x402 protocol](https://x402.org).
+Payment middleware for gRPC services that implements the [x402 protocol](https://x402.org).
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/becomeliminal/grpc-gateway-x402.svg)](https://pkg.go.dev/github.com/becomeliminal/grpc-gateway-x402)
 [![Go Report Card](https://goreportcard.com/badge/github.com/becomeliminal/grpc-gateway-x402)](https://goreportcard.com/report/github.com/becomeliminal/grpc-gateway-x402)
 
 ## Features
 
+- **Two transport options**: HTTP (for grpc-gateway) and native gRPC (for service-to-service)
 - Multi-currency: Accept any ERC-20 token (USDC, DAI, USDT, custom tokens)
 - Multi-chain: Ethereum, Base, Polygon, Arbitrum, Optimism, etc.
-- Per-endpoint pricing with wildcard pattern matching
+- Per-endpoint/method pricing with wildcard pattern matching
 - Payment context propagates to gRPC handlers
 - Custom HTML paywall support with User-Agent detection
 - Pluggable verification: Use Coinbase's facilitator, your own, or implement custom logic
 - Output schema support for API documentation
+- Streaming RPC support with upfront payment
 
-## Quick Start
+## Transport Options
+
+This library supports two x402 transport mechanisms:
+
+### 1. HTTP Transport (grpc-gateway)
+
+For exposing gRPC services as HTTP/JSON APIs using [grpc-gateway](https://github.com/grpc-ecosystem/grpc-gateway).
+
+**Use when:**
+- Building REST APIs from gRPC services
+- Supporting browser clients
+- Need OpenAPI/Swagger documentation
+- Want curl/HTTP compatibility
+
+**How it works:**
+```
+Browser/HTTP Client → HTTP/JSON → grpc-gateway + x402 → gRPC Service
+                                   ↑ HTTP middleware
+```
+
+See [Quick Start](#quick-start) below for HTTP transport usage.
+
+### 2. gRPC Transport (Native)
+
+For native gRPC-to-gRPC communication with x402 payments.
+
+**Use when:**
+- Building microservice-to-microservice payments
+- Mobile apps with native gRPC clients
+- High-performance scenarios (binary protobuf)
+- Service mesh environments (Istio, Linkerd)
+
+**How it works:**
+```
+gRPC Client → gRPC/Protobuf + x402 → gRPC Service
+                                     ↑ gRPC interceptor
+```
+
+See [gRPC Transport Documentation](./grpc/README.md) for native gRPC usage.
+
+### Which Should I Use?
+
+| Use Case | Transport | Implementation |
+|----------|-----------|----------------|
+| Browser clients | HTTP | grpc-gateway + HTTP middleware |
+| Mobile native apps | gRPC | Native interceptor |
+| REST API exposure | HTTP | grpc-gateway + HTTP middleware |
+| Microservice payments | gRPC | Native interceptor |
+| Both external + internal | Both | Use both transports simultaneously |
+
+## Quick Start (HTTP Transport)
+
+This section covers the HTTP transport for grpc-gateway. For native gRPC transport, see [gRPC Transport Documentation](./grpc/README.md).
 
 ### Installation
 
@@ -23,7 +77,7 @@ Payment middleware for grpc-gateway that implements the [x402 protocol](https://
 go get github.com/becomeliminal/grpc-gateway-x402
 ```
 
-### Basic Usage
+### Basic Usage (HTTP/grpc-gateway)
 
 ```go
 package main
