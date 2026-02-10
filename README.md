@@ -7,101 +7,51 @@ Payment middleware for gRPC services that implements the [x402 protocol](https:/
 
 ## Features
 
-- **Two transport options**: HTTP (for grpc-gateway) and native gRPC (for service-to-service)
-- Multi-currency: Accept any ERC-20 token (USDC, DAI, USDT, custom tokens)
-- Multi-chain: Ethereum, Base, Polygon, Arbitrum, Optimism, etc.
+- **V2 protocol**: CAIP-2 networks, structured payment requirements, multi-option 402 responses
+- **V1 backward compatible**: Auto-detects V1 clients, no migration required
+- Multi-currency: Accept any ERC-20 token (USDC, EURC, DAI, USDT, custom tokens)
+- Multi-chain: Arbitrum, Base, Polygon, Avalanche, Gnosis, Codex
 - Per-endpoint/method pricing with wildcard pattern matching
 - Payment context propagates to gRPC handlers
 - Custom HTML paywall support with User-Agent detection
-- Pluggable verification: Use Coinbase's facilitator, your own, or implement custom logic
-- Output schema support for API documentation
-- Streaming RPC support with upfront payment
+- Pluggable verification: Use any x402 facilitator or implement custom logic
+- HTTP (grpc-gateway) and native gRPC transports
 
-## Transport Options
-
-This library supports two x402 transport mechanisms:
-
-### 1. HTTP Transport (grpc-gateway)
-
-For exposing gRPC services as HTTP/JSON APIs using [grpc-gateway](https://github.com/grpc-ecosystem/grpc-gateway).
-
-**Use when:**
-- Building REST APIs from gRPC services
-- Supporting browser clients
-- Need OpenAPI/Swagger documentation
-- Want curl/HTTP compatibility
-
-**How it works:**
-```
-Browser/HTTP Client → HTTP/JSON → grpc-gateway + x402 → gRPC Service
-                                   ↑ HTTP middleware
-```
-
-See [Quick Start](#quick-start) below for HTTP transport usage.
-
-### 2. gRPC Transport (Native)
-
-For native gRPC-to-gRPC communication with x402 payments.
-
-**Use when:**
-- Building microservice-to-microservice payments
-- Mobile apps with native gRPC clients
-- High-performance scenarios (binary protobuf)
-- Service mesh environments (Istio, Linkerd)
-
-**How it works:**
-```
-gRPC Client → gRPC/Protobuf + x402 → gRPC Service
-                                     ↑ gRPC interceptor
-```
-
-See [gRPC Transport Documentation](./grpc/README.md) for native gRPC usage.
-
-### Which Should I Use?
-
-| Use Case | Transport | Implementation |
-|----------|-----------|----------------|
-| Browser clients | HTTP | grpc-gateway + HTTP middleware |
-| Mobile native apps | gRPC | Native interceptor |
-| REST API exposure | HTTP | grpc-gateway + HTTP middleware |
-| Microservice payments | gRPC | Native interceptor |
-| Both external + internal | Both | Use both transports simultaneously |
-
-## Quick Start (HTTP Transport)
-
-This section covers the HTTP transport for grpc-gateway. For native gRPC transport, see [gRPC Transport Documentation](./grpc/README.md).
+## Quick Start
 
 ### Installation
 
 ```bash
-go get github.com/becomeliminal/grpc-gateway-x402
+go get github.com/becomeliminal/grpc-gateway-x402/v2
 ```
 
-### Basic Usage (HTTP/grpc-gateway)
+### Basic Usage
 
 ```go
 package main
 
 import (
-    x402 "github.com/becomeliminal/grpc-gateway-x402"
-    "github.com/becomeliminal/grpc-gateway-x402/evm"
+    "net/http"
+
+    x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+    "github.com/becomeliminal/grpc-gateway-x402/v2/evm"
     "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 )
 
 func main() {
     // Create EVM verifier (supports all EVM chains + ERC-20 tokens)
-    verifier, _ := evm.NewEVMVerifier("https://facilitator.x402.org")
+    verifier, _ := evm.NewEVMVerifier("https://facilitator.liminal.cash")
 
     // Configure payment requirements
     x402Config := x402.Config{
         Verifier: verifier,
         EndpointPricing: map[string]x402.PricingRule{
             "/v1/premium/*": {
-                Amount: "1.00",  // $1.00
+                Amount: "1000000", // 1 USDC (6 decimals, atomic units)
                 AcceptedTokens: []x402.TokenRequirement{
                     {
-                        Network:       "base-mainnet",
-                        AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC
+                        Network:       "eip155:8453", // Base (CAIP-2)
+                        AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                         Symbol:        "USDC",
                         Recipient:     "0xYourAddress",
                     },
@@ -121,55 +71,75 @@ func main() {
 }
 ```
 
-### Access Payment Details in gRPC Handlers
+### Access Payment Details in Handlers
 
 ```go
 func (s *server) GetPremiumContent(ctx context.Context, req *pb.Request) (*pb.Response, error) {
-    // Extract payment info from gRPC context
     payment, ok := x402.GetPaymentFromGRPCContext(ctx)
     if !ok {
         return nil, status.Error(codes.Unauthenticated, "payment required")
     }
 
-    log.Printf("Received payment: %s %s from %s",
-        payment.Amount, payment.TokenSymbol, payment.PayerAddress)
+    log.Printf("Payment: %s %s on %s (tx: %s)",
+        payment.Amount, payment.TokenSymbol, payment.Network, payment.TransactionHash)
 
-    // Return premium content
     return &pb.Response{Data: "premium content"}, nil
 }
 ```
 
+## What Changed in V2
+
+| V1 | V2 |
+|---|---|
+| `go get github.com/becomeliminal/grpc-gateway-x402` | `go get github.com/becomeliminal/grpc-gateway-x402/v2` |
+| Header: `X-PAYMENT` | Header: `PAYMENT-SIGNATURE` |
+| Header: `X-PAYMENT-RESPONSE` | Header: `PAYMENT-RESPONSE` |
+| 402 body only | 402 body + `PAYMENT-REQUIRED` header |
+| Network: `"base-mainnet"` | Network: `"eip155:8453"` (CAIP-2) |
+| Amount: `"1.00"` (human-readable) | Amount: `"1000000"` (atomic units) |
+| `ChainVerifier.Verify(ctx, payment)` | `ChainVerifier.Verify(ctx, payload, requirements)` |
+| `SupportedNetworks() []NetworkInfo` | `SupportedKinds() []SupportedKind` |
+| No cross-validation | Payload `accepted` cross-validated against `requirements` |
+
+### Amounts Are Atomic Units
+
+V2 uses atomic units (smallest denomination) instead of human-readable decimals:
+
+| Token | Decimals | 1.00 token | Atomic units |
+|---|---|---|---|
+| USDC | 6 | 1 USDC | `"1000000"` |
+| EURC | 6 | 1 EURC | `"1000000"` |
+| DAI | 18 | 1 DAI | `"1000000000000000000"` |
+| USDT | 6 | 1 USDT | `"1000000"` |
+
 ## Configuration
 
-### Multi-Currency
+### Multi-Currency, Multi-Chain
 
 ```go
 x402Config := x402.Config{
     Verifier: verifier,
     EndpointPricing: map[string]x402.PricingRule{
         "/v1/api/*": {
-            Amount: "0.10",
+            Amount: "100000", // 0.10 USDC
             AcceptedTokens: []x402.TokenRequirement{
                 {
-                    Network:       "base-mainnet",
+                    Network:       "eip155:8453",  // Base
                     AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
-                    TokenDecimals: 6,
                 },
                 {
-                    Network:       "ethereum-mainnet",
-                    AssetContract: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-                    Symbol:        "DAI",
+                    Network:       "eip155:42161", // Arbitrum
+                    AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+                    Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
-                    TokenDecimals: 18,
                 },
                 {
-                    Network:       "polygon-mainnet",
+                    Network:       "eip155:137",   // Polygon
                     AssetContract: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
-                    TokenDecimals: 6,
                 },
             },
         },
@@ -181,10 +151,10 @@ x402Config := x402.Config{
 
 ```go
 EndpointPricing: map[string]x402.PricingRule{
-    "/v1/premium/*":     {Amount: "1.00", ...},  // $1.00 for premium
-    "/v1/basic/*":       {Amount: "0.10", ...},  // $0.10 for basic
-    "/v1/micro/*":       {Amount: "0.01", ...},  // $0.01 for micro
-    "/v1/specific-path": {Amount: "0.50", ...},  // Exact match
+    "/v1/premium/*":     {Amount: "1000000", ...},  // 1 USDC
+    "/v1/basic/*":       {Amount: "100000", ...},   // 0.10 USDC
+    "/v1/micro/*":       {Amount: "10000", ...},    // 0.01 USDC
+    "/v1/specific-path": {Amount: "500000", ...},   // 0.50 USDC
 }
 ```
 
@@ -205,7 +175,7 @@ Config{
 ```go
 Config{
     DefaultPricing: &x402.PricingRule{
-        Amount: "0.05",  // Default for unmatched paths
+        Amount: "50000", // 0.05 USDC default for unmatched paths
         AcceptedTokens: []x402.TokenRequirement{...},
     },
 }
@@ -219,9 +189,8 @@ Config{
         <html>
         <head><title>Payment Required</title></head>
         <body>
-            <h1>💳 Payment Required</h1>
+            <h1>Payment Required</h1>
             <p>This content requires payment. Please connect your wallet to continue.</p>
-            <button onclick="connectWallet()">Connect Wallet</button>
         </body>
         </html>
     `,
@@ -234,83 +203,19 @@ Browsers get HTML, API clients get JSON.
 
 ```go
 PricingRule{
-    Amount: "1.00",
+    Amount: "1000000",
     OutputSchema: map[string]interface{}{
         "type": "object",
         "properties": map[string]interface{}{
             "joke": map[string]interface{}{
-                "type": "string",
+                "type":        "string",
                 "description": "A programming joke",
-            },
-            "paid": map[string]interface{}{
-                "type": "boolean",
             },
         },
     },
     AcceptedTokens: []x402.TokenRequirement{...},
 }
 ```
-
-## Custom Facilitators
-
-The library supports any x402-compatible facilitator or custom verification logic.
-
-### Use Any Facilitator
-
-```go
-// Coinbase's facilitator
-verifier, _ := evm.NewEVMVerifier("https://facilitator.x402.org")
-
-// Your own facilitator
-verifier, _ := evm.NewEVMVerifier("https://my-facilitator.com")
-
-// Local development
-verifier, _ := evm.NewEVMVerifier("http://localhost:3000")
-```
-
-### Implement Custom Verification
-
-Skip facilitators entirely by implementing the `ChainVerifier` interface:
-
-```go
-type CustomVerifier struct {
-    ethClient *ethclient.Client
-}
-
-func (v *CustomVerifier) Verify(ctx context.Context, payment *x402.Payment) (*x402.VerificationResult, error) {
-    // Your verification logic
-    // - Check on-chain directly
-    // - Query your own database
-    // - Implement custom rules
-    return &x402.VerificationResult{Valid: true}, nil
-}
-
-func (v *CustomVerifier) Settle(ctx context.Context, payment *x402.Payment) (*x402.SettlementResult, error) {
-    // Your settlement logic
-    // - Submit transaction yourself
-    // - Update internal ledger
-    // - Call payment processor
-    return &x402.SettlementResult{TransactionHash: "0x..."}, nil
-}
-
-func (v *CustomVerifier) SupportedNetworks() []x402.NetworkInfo {
-    return []x402.NetworkInfo{{Network: "ethereum-mainnet"}}
-}
-
-// Use it
-config := x402.Config{
-    Verifier: &CustomVerifier{ethClient: client},
-}
-```
-
-## How It Works
-
-1. Client requests resource
-2. Server returns 402 with payment requirements
-3. Client signs payment (EIP-3009)
-4. Client retries with X-PAYMENT header
-5. Middleware verifies and settles payment
-6. Server returns resource with X-PAYMENT-RESPONSE
 
 ## Protocol Flow
 
@@ -320,45 +225,273 @@ Client                    Gateway                    Facilitator              Bl
   |-- GET /v1/premium/data ->|                            |                        |
   |                          |                            |                        |
   |<- 402 Payment Required --|                            |                        |
-  |   (with payment options) |                            |                        |
+  |   Body: {accepts: [...]} |                            |                        |
+  |   PAYMENT-REQUIRED: ...  |                            |                        |
   |                          |                            |                        |
   |-- GET /v1/premium/data ->|                            |                        |
-  |   X-PAYMENT: <sig>       |                            |                        |
-  |                          |-- POST /verify ----------->|                        |
+  |   PAYMENT-SIGNATURE: ... |                            |                        |
+  |                          |-- POST /v2/x402/verify --->|                        |
   |                          |<- {valid: true} -----------|                        |
   |                          |                            |                        |
-  |                          |-- POST /settle ----------->|                        |
+  |                          |-- POST /v2/x402/settle --->|                        |
   |                          |                            |-- transfer() --------->|
   |                          |                            |<- tx hash -------------|
   |                          |<- {txHash: "0x..."} -------|                        |
   |                          |                            |                        |
   |<- 200 OK ----------------|                            |                        |
-  |   X-PAYMENT-RESPONSE     |                            |                        |
+  |   PAYMENT-RESPONSE: ...  |                            |                        |
   |   Premium Data           |                            |                        |
 ```
 
-## Supported Networks
+## Types
 
-EVM chains via Coinbase facilitator: Ethereum, Base, Polygon, Arbitrum, Optimism (mainnet/testnet)
+### `Config`
 
-## Token Addresses
+```go
+type Config struct {
+    Verifier         ChainVerifier              // Payment verification backend
+    EndpointPricing  map[string]PricingRule      // URL patterns to pricing (HTTP)
+    MethodPricing    map[string]PricingRule      // gRPC method names to pricing
+    DefaultPricing   *PricingRule               // Fallback pricing (optional)
+    ValidityDuration time.Duration              // Payment validity (default: 5 min)
+    SkipPaths        []string                   // HTTP paths to skip
+    SkipMethods      []string                   // gRPC methods to skip
+    CustomPaywallHTML string                    // HTML for browser 402 responses
+}
+```
+
+### `PricingRule`
+
+```go
+type PricingRule struct {
+    Amount         string                 // Atomic units (e.g., "1000000" = 1 USDC)
+    AcceptedTokens []TokenRequirement     // Accepted payment options
+    Description    string                 // What this payment is for
+    MimeType       string                 // Resource MIME type (optional)
+    OutputSchema   map[string]interface{} // Response JSON schema (optional)
+}
+```
+
+### `TokenRequirement`
+
+```go
+type TokenRequirement struct {
+    Network       string // CAIP-2 (e.g., "eip155:8453")
+    AssetContract string // Token contract address
+    Symbol        string // Token symbol (e.g., "USDC")
+    Recipient     string // Payment recipient address
+    TokenName     string // Human-readable name (optional)
+    TokenDecimals int    // Token decimals (optional)
+}
+```
+
+### `PaymentRequirements`
+
+Structured requirements sent in the 402 response. Each entry in the `Accepts` array is one of these.
+
+```go
+type PaymentRequirements struct {
+    Scheme            string                 `json:"scheme"`
+    Network           string                 `json:"network"`           // CAIP-2
+    Amount            string                 `json:"amount"`            // atomic units
+    Asset             string                 `json:"asset"`             // token contract
+    PayTo             string                 `json:"payTo"`             // recipient
+    MaxTimeoutSeconds int                    `json:"maxTimeoutSeconds,omitempty"`
+    Extra             map[string]interface{} `json:"extra,omitempty"`   // merchant metadata
+}
+```
+
+The `Extra` map allows merchant-defined metadata (e.g., `{"orderId": "...", "tier": "premium"}`).
+
+### `PaymentPayload`
+
+What the client sends in the `PAYMENT-SIGNATURE` header.
+
+```go
+type PaymentPayload struct {
+    X402Version int                    `json:"x402Version"`
+    Accepted    PaymentRequirements    `json:"accepted"`    // what client agreed to
+    Payload     interface{}            `json:"payload"`     // scheme-specific (e.g., EVMPayload)
+    Extensions  map[string]interface{} `json:"extensions,omitempty"` // protocol extensions
+}
+```
+
+The `Extensions` map allows protocol extensions without breaking changes.
+
+### `PaymentRequiredResponse`
+
+The 402 response body. The `Accepts` array lets merchants offer multiple payment options (different chains, tokens, amounts).
+
+```go
+type PaymentRequiredResponse struct {
+    X402Version int                   `json:"x402Version"`
+    Error       string                `json:"error"`
+    Accepts     []PaymentRequirements `json:"accepts"`
+}
+```
+
+### `PaymentResponse`
+
+Settlement receipt sent in the `PAYMENT-RESPONSE` header.
+
+```go
+type PaymentResponse struct {
+    Success     bool   `json:"success"`
+    Transaction string `json:"transaction,omitempty"` // tx hash
+    Network     string `json:"network,omitempty"`     // CAIP-2
+    Payer       string `json:"payer,omitempty"`
+    ErrorReason string `json:"errorReason,omitempty"`
+}
+```
+
+### `PaymentContext`
+
+What handlers receive after payment is verified and settled.
+
+```go
+type PaymentContext struct {
+    Verified        bool
+    PayerAddress    string
+    Amount          string
+    TokenSymbol     string
+    Network         string    // CAIP-2
+    TransactionHash string
+    SettledAt       time.Time
+}
+```
+
+### `SupportedKind`
+
+Scheme + network pair returned by the facilitator.
+
+```go
+type SupportedKind struct {
+    Scheme  string `json:"scheme"`  // e.g., "exact"
+    Network string `json:"network"` // CAIP-2
+}
+```
+
+### `ChainVerifier` Interface
+
+```go
+type ChainVerifier interface {
+    Verify(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error)
+    Settle(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error)
+    SupportedKinds() []SupportedKind
+}
+```
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `PaymentMiddleware(cfg Config)` | Creates HTTP middleware |
+| `GetPaymentFromContext(ctx)` | Extract payment from HTTP context |
+| `GetPaymentFromGRPCContext(ctx)` | Extract payment from gRPC metadata |
+| `RequirePayment(ctx)` | Extract payment or return error |
+| `WithPaymentMetadata()` | grpc-gateway option to propagate payment context |
+| `EncodePaymentPayload(payload)` | Encode payload for `PAYMENT-SIGNATURE` header |
+| `DecodePaymentResponse(header)` | Decode `PAYMENT-RESPONSE` header |
+| `ReadPaymentRequirements(resp)` | Read requirements from 402 response |
+| `evm.NewEVMVerifier(url)` | Create EVM chain verifier |
+
+## Supported Networks & Token Addresses
 
 ### USDC
 
-- **Base Mainnet**: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
-- **Base Sepolia**: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
-- **Ethereum Mainnet**: `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`
-- **Polygon Mainnet**: `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359`
+| Network | CAIP-2 | Address |
+|---|---|---|
+| Arbitrum | `eip155:42161` | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` |
+| Base | `eip155:8453` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| Polygon | `eip155:137` | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` |
+| Avalanche | `eip155:43114` | `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E` |
+| Gnosis | `eip155:100` | `0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83` |
+| Codex | `eip155:81224` | `0x06eFdBFf2a14a7c8E15944D1F4A48F9F95F663A4` |
 
-### DAI
+### EURC
 
-- **Ethereum Mainnet**: `0x6B175474E89094C44Da98b954EedeAC495271d0F`
-- **Base Mainnet**: `0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb`
+| Network | CAIP-2 | Address |
+|---|---|---|
+| Base | `eip155:8453` | `0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42` |
 
-### USDT
+## gRPC Transport
 
-- **Ethereum Mainnet**: `0xdAC17F958D2ee523a2206206994597C13D831ec7`
-- **Polygon Mainnet**: `0xc2132D05D31c914a87C6611C10748AEb04B58e8F`
+For native gRPC-to-gRPC communication, use the interceptors instead of HTTP middleware.
+
+### Server Setup
+
+```go
+import x402grpc "github.com/becomeliminal/grpc-gateway-x402/v2/grpc"
+
+srv := grpc.NewServer(
+    grpc.UnaryInterceptor(x402grpc.UnaryServerInterceptor(x402Config)),
+    grpc.StreamInterceptor(x402grpc.StreamServerInterceptor(x402Config)),
+)
+```
+
+### gRPC Metadata Keys
+
+| Version | Payment | Response | Requirements |
+|---|---|---|---|
+| V2 | `payment-signature` | `payment-response` | `payment-required` |
+| V1 | `x402-payment` | `x402-payment-response` | `x402-payment-requirements` |
+
+### Handler Access
+
+```go
+payment, ok := x402grpc.GetPaymentFromContext(ctx)
+// or
+payment, err := x402grpc.RequirePayment(ctx)
+```
+
+## Custom Facilitators
+
+```go
+// Liminal facilitator
+verifier, _ := evm.NewEVMVerifier("https://facilitator.liminal.cash")
+
+// Coinbase facilitator
+verifier, _ := evm.NewEVMVerifier("https://facilitator.x402.org")
+
+// Your own facilitator
+verifier, _ := evm.NewEVMVerifier("https://my-facilitator.com")
+
+// Local development
+verifier, _ := evm.NewEVMVerifier("http://localhost:3000")
+```
+
+### Custom Verification
+
+Skip facilitators entirely by implementing `ChainVerifier`:
+
+```go
+type CustomVerifier struct{}
+
+func (v *CustomVerifier) Verify(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.VerificationResult, error) {
+    // Your verification logic
+    return &x402.VerificationResult{Valid: true}, nil
+}
+
+func (v *CustomVerifier) Settle(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.SettlementResult, error) {
+    // Your settlement logic
+    return &x402.SettlementResult{TransactionHash: "0x..."}, nil
+}
+
+func (v *CustomVerifier) SupportedKinds() []x402.SupportedKind {
+    return []x402.SupportedKind{{Scheme: "exact", Network: "eip155:8453"}}
+}
+
+config := x402.Config{Verifier: &CustomVerifier{}}
+```
+
+## V1 Compatibility
+
+The V2 middleware auto-detects V1 clients via header detection:
+
+- `X-PAYMENT` header → V1 path (responds with `X-PAYMENT-RESPONSE`)
+- `PAYMENT-SIGNATURE` header → V2 path (responds with `PAYMENT-RESPONSE`)
+
+Both work simultaneously. Existing V1 clients require no changes.
 
 ## Examples
 
@@ -372,109 +505,6 @@ See [`examples/`](./examples) for more:
 - `basic/` - Single token integration
 - `multi-token/` - Multiple currencies and networks, tiered pricing
 - `jokes-api/` - Fun demo (pay $0.0001 for programming jokes)
-
-## API Reference
-
-### Types
-
-#### `Config`
-
-Main configuration for payment middleware.
-
-```go
-type Config struct {
-    Verifier         ChainVerifier          // Payment verification backend
-    EndpointPricing  map[string]PricingRule // Path patterns to pricing
-    DefaultPricing   *PricingRule           // Fallback pricing (optional)
-    ValidityDuration time.Duration          // Payment validity (default: 5 min)
-    SkipPaths        []string               // Paths to skip payment checks
-}
-```
-
-#### `PricingRule`
-
-Defines payment requirements for an endpoint.
-
-```go
-type PricingRule struct {
-    Amount         string              // Payment amount (e.g., "1.00")
-    AcceptedTokens []TokenRequirement  // Accepted payment options
-    Description    string              // Human-readable description
-    MimeType       string              // Resource MIME type (optional)
-}
-```
-
-#### `TokenRequirement`
-
-Specifies a payment option (network + token).
-
-```go
-type TokenRequirement struct {
-    Network       string // Blockchain network
-    AssetContract string // Token contract address
-    Symbol        string // Token symbol (e.g., "USDC")
-    Recipient     string // Payment recipient address
-    TokenName     string // Human-readable token name
-    TokenDecimals int    // Token decimals (optional)
-}
-```
-
-#### `PaymentContext`
-
-Payment information accessible in handlers.
-
-```go
-type PaymentContext struct {
-    Verified        bool
-    PayerAddress    string
-    Amount          string
-    TokenSymbol     string
-    Network         string
-    TransactionHash string
-    SettledAt       time.Time
-}
-```
-
-### Functions
-
-- `PaymentMiddleware(cfg Config)` - Creates HTTP middleware
-- `GetPaymentFromContext(ctx)` - Extract payment from HTTP context
-- `GetPaymentFromGRPCContext(ctx)` - Extract payment from gRPC metadata
-- `WithPaymentMetadata()` - Propagate payment to gRPC context
-- `evm.NewEVMVerifier(url)` - Create EVM verifier
-
-## Architecture
-
-The library is designed with extensibility in mind:
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  HTTP Request                       │
-└────────────────────┬────────────────────────────────┘
-                     │
-                     ▼
-         ┌───────────────────────┐
-         │ PaymentMiddleware     │  Standard http.Handler
-         │ - Check path rules    │
-         │ - Parse X-PAYMENT     │
-         │ - Inject context      │
-         └───────────┬───────────┘
-                     │
-                     ▼
-         ┌───────────────────────┐
-         │   ChainVerifier       │  Interface (pluggable!)
-         │   - Verify payment    │
-         │   - Settle on-chain   │
-         └───────────┬───────────┘
-                     │
-         ┌───────────┼───────────┐
-         │           │           │
-         ▼           ▼           ▼
-    ┌────────┐  ┌────────┐  ┌────────┐
-    │  EVM   │  │ Solana │  │Future  │  Future: Easy to add new chains!
-    │Verifier│  │(TODO)  │  │chains  │
-    └────────┘  └────────┘  └────────┘
-```
 
 ## Testing
 
