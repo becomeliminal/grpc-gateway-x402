@@ -147,7 +147,7 @@ func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
 	return &PaymentRequirements{
 		Scheme:  "exact",
 		Network: token.Network,
-		Amount:  rule.Amount,
+		Amount:  token.Amount,
 		Asset:   token.AssetContract,
 		PayTo:   token.Recipient,
 	}
@@ -164,7 +164,7 @@ func MatchClientToken(rule *PricingRule, payload *PaymentPayload) (*PaymentRequi
 			return &PaymentRequirements{
 				Scheme:  "exact",
 				Network: token.Network,
-				Amount:  rule.Amount,
+				Amount:  token.Amount,
 				Asset:   token.AssetContract,
 				PayTo:   token.Recipient,
 			}, token.Symbol
@@ -187,7 +187,7 @@ func sendPaymentRequired(w http.ResponseWriter, r *http.Request, rule *PricingRu
 		accepts = append(accepts, PaymentRequirements{
 			Scheme:            "exact",
 			Network:           token.Network,
-			Amount:            rule.Amount,
+			Amount:            token.Amount,
 			Asset:             token.AssetContract,
 			PayTo:             token.Recipient,
 			MaxTimeoutSeconds: int(cfg.ValidityDuration.Seconds()),
@@ -384,7 +384,7 @@ func buildAcceptsFromRule(rule *PricingRule, validityDuration time.Duration) []P
 		accepts = append(accepts, PaymentRequirements{
 			Scheme:            "exact",
 			Network:           token.Network,
-			Amount:            rule.Amount,
+			Amount:            token.Amount,
 			Asset:             token.AssetContract,
 			PayTo:             token.Recipient,
 			MaxTimeoutSeconds: int(validityDuration.Seconds()),

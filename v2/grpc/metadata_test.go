@@ -354,19 +354,20 @@ func TestExtractPaymentFromMetadata_NotFound(t *testing.T) {
 
 func TestBuildPaymentRequirements(t *testing.T) {
 	rule := &x402.PricingRule{
-		Amount: "1000000",
 		AcceptedTokens: []x402.TokenRequirement{
 			{
 				Network:       "eip155:84532",
 				AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 				Symbol:        "USDC",
 				Recipient:     "0xRecipient",
+				Amount:        "1000000",
 			},
 			{
 				Network:       "eip155:42161",
 				AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
 				Symbol:        "USDC",
 				Recipient:     "0xRecipient",
+				Amount:        "1000000",
 			},
 		},
 	}
@@ -405,7 +406,6 @@ func TestBuildPaymentRequirements(t *testing.T) {
 
 func TestBuildPaymentRequirements_EmptyTokens(t *testing.T) {
 	rule := &x402.PricingRule{
-		Amount:         "1000000",
 		AcceptedTokens: []x402.TokenRequirement{},
 	}
 

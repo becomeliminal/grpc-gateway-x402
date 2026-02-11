@@ -18,9 +18,8 @@ func TestMatchEndpoint(t *testing.T) {
 			config: Config{
 				EndpointPricing: map[string]PricingRule{
 					"/v1/hello": {
-						Amount: "1000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 						},
 					},
 				},
@@ -34,9 +33,8 @@ func TestMatchEndpoint(t *testing.T) {
 			config: Config{
 				EndpointPricing: map[string]PricingRule{
 					"/v1/premium/*": {
-						Amount: "5000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "5000000"},
 						},
 					},
 				},
@@ -50,9 +48,8 @@ func TestMatchEndpoint(t *testing.T) {
 			config: Config{
 				EndpointPricing: map[string]PricingRule{
 					"/*": {
-						Amount: "100000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "100000"},
 						},
 					},
 				},
@@ -66,16 +63,14 @@ func TestMatchEndpoint(t *testing.T) {
 			config: Config{
 				EndpointPricing: map[string]PricingRule{
 					"/v1/specific": {
-						Amount: "500000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "500000"},
 						},
 					},
 				},
 				DefaultPricing: &PricingRule{
-					Amount: "50000",
 					AcceptedTokens: []TokenRequirement{
-						{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+						{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "50000"},
 					},
 				},
 			},
@@ -88,9 +83,8 @@ func TestMatchEndpoint(t *testing.T) {
 			config: Config{
 				EndpointPricing: map[string]PricingRule{
 					"/v1/specific": {
-						Amount: "500000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "500000"},
 						},
 					},
 				},
@@ -108,8 +102,8 @@ func TestMatchEndpoint(t *testing.T) {
 				t.Errorf("expected match=%v, got %v", tt.shouldMatch, matched)
 			}
 
-			if tt.shouldMatch && rule.Amount != tt.expectedAmount {
-				t.Errorf("expected amount=%s, got %s", tt.expectedAmount, rule.Amount)
+			if tt.shouldMatch && rule.AcceptedTokens[0].Amount != tt.expectedAmount {
+				t.Errorf("expected amount=%s, got %s", tt.expectedAmount, rule.AcceptedTokens[0].Amount)
 			}
 		})
 	}
@@ -128,9 +122,8 @@ func TestMatchMethod(t *testing.T) {
 			config: Config{
 				MethodPricing: map[string]PricingRule{
 					"/test.v1.TestService/GetData": {
-						Amount: "1000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 						},
 					},
 				},
@@ -144,9 +137,8 @@ func TestMatchMethod(t *testing.T) {
 			config: Config{
 				MethodPricing: map[string]PricingRule{
 					"/test.v1.TestService/*": {
-						Amount: "2000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "2000000"},
 						},
 					},
 				},
@@ -160,9 +152,8 @@ func TestMatchMethod(t *testing.T) {
 			config: Config{
 				MethodPricing: map[string]PricingRule{
 					"/test.v1.TestService/*": {
-						Amount: "1000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 						},
 					},
 				},
@@ -176,9 +167,8 @@ func TestMatchMethod(t *testing.T) {
 			config: Config{
 				MethodPricing: map[string]PricingRule{},
 				DefaultPricing: &PricingRule{
-					Amount: "100000",
 					AcceptedTokens: []TokenRequirement{
-						{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+						{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "100000"},
 					},
 				},
 			},
@@ -196,8 +186,8 @@ func TestMatchMethod(t *testing.T) {
 				t.Errorf("expected match=%v, got %v", tt.shouldMatch, matched)
 			}
 
-			if tt.shouldMatch && rule.Amount != tt.expectedAmount {
-				t.Errorf("expected amount=%s, got %s", tt.expectedAmount, rule.Amount)
+			if tt.shouldMatch && rule.AcceptedTokens[0].Amount != tt.expectedAmount {
+				t.Errorf("expected amount=%s, got %s", tt.expectedAmount, rule.AcceptedTokens[0].Amount)
 			}
 		})
 	}
@@ -212,9 +202,8 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "valid rule",
 			rule: PricingRule{
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 			wantErr: false,
@@ -231,7 +220,6 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "no accepted tokens",
 			rule: PricingRule{
-				Amount:         "1000000",
 				AcceptedTokens: []TokenRequirement{},
 			},
 			wantErr: true,
@@ -239,9 +227,8 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "invalid token - missing symbol",
 			rule: PricingRule{
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", AssetContract: "0x123", Recipient: "0xabc"},
+					{Network: "eip155:8453", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 			wantErr: true,
@@ -249,9 +236,8 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "invalid token - missing network",
 			rule: PricingRule{
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+					{Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 			wantErr: true,
@@ -259,9 +245,8 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "invalid token - missing recipient",
 			rule: PricingRule{
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Amount: "1000000"},
 				},
 			},
 			wantErr: true,
@@ -269,9 +254,8 @@ func TestPricingRuleValidation(t *testing.T) {
 		{
 			name: "invalid token - missing asset contract",
 			rule: PricingRule{
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", Recipient: "0xabc"},
+					{Network: "eip155:8453", Symbol: "USDC", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 			wantErr: true,
@@ -300,9 +284,8 @@ func TestConfigValidation(t *testing.T) {
 				Verifier: &MockVerifier{},
 				EndpointPricing: map[string]PricingRule{
 					"/v1/paid": {
-						Amount: "1000000",
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 						},
 					},
 				},
@@ -322,7 +305,7 @@ func TestConfigValidation(t *testing.T) {
 				Verifier: &MockVerifier{},
 				EndpointPricing: map[string]PricingRule{
 					"/v1/paid": {
-						// Missing amount
+						// Missing amount on token
 						AcceptedTokens: []TokenRequirement{
 							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
 						},
@@ -337,7 +320,6 @@ func TestConfigValidation(t *testing.T) {
 				Verifier: &MockVerifier{},
 				MethodPricing: map[string]PricingRule{
 					"/test.Service/Method": {
-						Amount:         "1000000",
 						AcceptedTokens: []TokenRequirement{}, // Empty
 					},
 				},
@@ -349,7 +331,7 @@ func TestConfigValidation(t *testing.T) {
 			config: Config{
 				Verifier: &MockVerifier{},
 				DefaultPricing: &PricingRule{
-					// Missing amount
+					// Missing amount on token
 					AcceptedTokens: []TokenRequirement{
 						{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
 					},
@@ -385,13 +367,13 @@ func TestConfigValidation_SetsDefaultValidityDuration(t *testing.T) {
 
 func TestBuildRequirementsFromRule(t *testing.T) {
 	rule := &PricingRule{
-		Amount: "1000000",
 		AcceptedTokens: []TokenRequirement{
 			{
 				Network:       "eip155:84532",
 				Symbol:        "USDC",
 				AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 				Recipient:     "0xRecipient",
+				Amount:        "1000000",
 			},
 		},
 	}
@@ -420,7 +402,6 @@ func TestBuildRequirementsFromRule(t *testing.T) {
 
 func TestBuildRequirementsFromRule_EmptyTokens(t *testing.T) {
 	rule := &PricingRule{
-		Amount:         "1000000",
 		AcceptedTokens: []TokenRequirement{},
 	}
 
@@ -432,19 +413,20 @@ func TestBuildRequirementsFromRule_EmptyTokens(t *testing.T) {
 
 func TestBuildAcceptsFromRule(t *testing.T) {
 	rule := &PricingRule{
-		Amount: "1000000",
 		AcceptedTokens: []TokenRequirement{
 			{
 				Network:       "eip155:84532",
 				Symbol:        "USDC",
 				AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 				Recipient:     "0xRecipient",
+				Amount:        "1000000",
 			},
 			{
 				Network:       "eip155:42161",
 				Symbol:        "USDC",
 				AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
 				Recipient:     "0xRecipient",
+				Amount:        "1000000",
 			},
 		},
 	}

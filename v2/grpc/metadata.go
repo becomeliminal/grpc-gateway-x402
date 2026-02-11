@@ -168,7 +168,7 @@ func BuildPaymentRequirements(rule *x402.PricingRule, fullMethod string, validit
 		accepts = append(accepts, x402.PaymentRequirements{
 			Scheme:  "exact",
 			Network: token.Network,
-			Amount:  rule.Amount,
+			Amount:  token.Amount,
 			Asset:   token.AssetContract,
 			PayTo:   token.Recipient,
 		})

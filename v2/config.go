@@ -43,10 +43,8 @@ type Config struct {
 
 // PricingRule defines payment requirements for an endpoint.
 type PricingRule struct {
-	// Amount is the payment amount required in atomic units.
-	Amount string
-
 	// AcceptedTokens lists the currencies/tokens accepted for this endpoint.
+	// Each token specifies its own Amount in atomic units.
 	AcceptedTokens []TokenRequirement
 
 	// Description explains what this payment is for.
@@ -72,6 +70,9 @@ type TokenRequirement struct {
 
 	// Recipient is the address that will receive payment.
 	Recipient string
+
+	// Amount is the payment amount required in atomic units for this token.
+	Amount string
 
 	// TokenName is the human-readable token name (optional).
 	TokenName string
@@ -113,10 +114,6 @@ func (c *Config) Validate() error {
 
 // Validate checks if the pricing rule is valid.
 func (p *PricingRule) Validate() error {
-	if p.Amount == "" {
-		return fmt.Errorf("amount is required")
-	}
-
 	if len(p.AcceptedTokens) == 0 {
 		return fmt.Errorf("at least one accepted token is required")
 	}
@@ -146,6 +143,10 @@ func (t *TokenRequirement) Validate() error {
 
 	if t.AssetContract == "" {
 		return fmt.Errorf("asset contract is required")
+	}
+
+	if t.Amount == "" {
+		return fmt.Errorf("amount is required")
 	}
 
 	return nil

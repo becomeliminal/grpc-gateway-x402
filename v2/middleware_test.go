@@ -41,13 +41,13 @@ func testConfig() Config {
 		Verifier: &MockVerifier{},
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
 					{
 						Network:       "eip155:84532",
 						Symbol:        "USDC",
 						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Recipient:     "0xRecipient",
+						Amount:        "1000000",
 					},
 				},
 			},
@@ -247,9 +247,8 @@ func TestPaymentMiddleware_V2Header_ValidPayment(t *testing.T) {
 		Verifier: verifier,
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
 				},
 			},
 		},
@@ -365,9 +364,8 @@ func TestPaymentMiddleware_V1Header_Fallback(t *testing.T) {
 		Verifier: verifier,
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
 				},
 			},
 		},
@@ -454,9 +452,8 @@ func TestPaymentMiddleware_VerificationFailed(t *testing.T) {
 		Verifier: verifier,
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
 				},
 			},
 		},
@@ -481,9 +478,8 @@ func TestPaymentMiddleware_SkipPaths(t *testing.T) {
 		Verifier: &MockVerifier{},
 		EndpointPricing: map[string]PricingRule{
 			"/*": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 		},
@@ -511,9 +507,8 @@ func TestPaymentMiddleware_CustomPaywallHTML(t *testing.T) {
 		Verifier: &MockVerifier{},
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
-				Amount: "1000000",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
 				},
 			},
 		},
