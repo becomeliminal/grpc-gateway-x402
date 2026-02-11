@@ -53,10 +53,10 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Build requirements from the matched pricing rule.
+			// Default requirements from first accepted token (used for V1 legacy).
 			requirements := buildRequirementsFromRule(rule)
 
-			// Parse payment and build V2 payload.
+			// Parse payment header.
 			var payload *PaymentPayload
 			var err error
 			if isV2 {
@@ -67,6 +67,16 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 			if err != nil {
 				sendError(w, http.StatusBadRequest, fmt.Sprintf("Invalid payment header: %v", err))
 				return
+			}
+
+			// For V2, match the client's chosen token against the rule's accepted tokens
+			// so requirements/symbol are correct for multi-token rules.
+			var tokenSymbol string
+			if isV2 && payload != nil {
+				if matched, symbol := MatchClientToken(rule, payload); matched != nil {
+					requirements = matched
+					tokenSymbol = symbol
+				}
 			}
 
 			// Verify the payment.
@@ -88,12 +98,17 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Resolve token symbol from rule match or verifier.
+			if tokenSymbol == "" {
+				tokenSymbol = verifyResult.TokenSymbol
+			}
+
 			// Create payment context for downstream handlers.
 			paymentCtx := &PaymentContext{
 				Verified:        true,
 				PayerAddress:    verifyResult.PayerAddress,
 				Amount:          verifyResult.Amount,
-				TokenSymbol:     verifyResult.TokenSymbol,
+				TokenSymbol:     tokenSymbol,
 				Network:         requirements.Network,
 				TransactionHash: settlementResult.TransactionHash,
 				SettledAt:       settlementResult.SettledAt,
@@ -122,8 +137,8 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 	}
 }
 
-// buildRequirementsFromRule constructs the first matching PaymentRequirements from a pricing rule.
-// In practice, the client's accepted requirements are cross-validated against all tokens in the rule.
+// buildRequirementsFromRule constructs PaymentRequirements from the first accepted token.
+// Used as a fallback for V1 legacy payments. V2 payments use matchClientToken instead.
 func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
 	if len(rule.AcceptedTokens) == 0 {
 		return nil
@@ -136,6 +151,26 @@ func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
 		Asset:   token.AssetContract,
 		PayTo:   token.Recipient,
 	}
+}
+
+// MatchClientToken finds the accepted token matching the client's chosen asset+network.
+// Returns the requirements for that token and its symbol, or nil if no match.
+func MatchClientToken(rule *PricingRule, payload *PaymentPayload) (*PaymentRequirements, string) {
+	clientAsset := strings.ToLower(payload.Accepted.Asset)
+	clientNetwork := payload.Accepted.Network
+
+	for _, token := range rule.AcceptedTokens {
+		if strings.ToLower(token.AssetContract) == clientAsset && token.Network == clientNetwork {
+			return &PaymentRequirements{
+				Scheme:  "exact",
+				Network: token.Network,
+				Amount:  rule.Amount,
+				Asset:   token.AssetContract,
+				PayTo:   token.Recipient,
+			}, token.Symbol
+		}
+	}
+	return nil, ""
 }
 
 // sendPaymentRequired sends a 402 Payment Required response with V2 format.

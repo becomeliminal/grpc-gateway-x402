@@ -42,6 +42,15 @@ func StreamServerInterceptor(cfg x402.Config) grpc.StreamServerInterceptor {
 		}
 		requirements := &accepts[0]
 
+		// Match client's chosen token against accepted tokens.
+		var tokenSymbol string
+		if payload != nil {
+			if matched, symbol := x402.MatchClientToken(rule, payload); matched != nil {
+				requirements = matched
+				tokenSymbol = symbol
+			}
+		}
+
 		verifyResult, err := cfg.Verifier.Verify(ctx, payload, requirements)
 		if err != nil {
 			return status.Error(codes.Internal, fmt.Sprintf("payment verification error: %v", err))
@@ -56,11 +65,15 @@ func StreamServerInterceptor(cfg x402.Config) grpc.StreamServerInterceptor {
 			return status.Error(codes.Unavailable, fmt.Sprintf("payment settlement failed: %v", err))
 		}
 
+		if tokenSymbol == "" {
+			tokenSymbol = verifyResult.TokenSymbol
+		}
+
 		paymentCtx := &x402.PaymentContext{
 			Verified:        true,
 			PayerAddress:    verifyResult.PayerAddress,
 			Amount:          verifyResult.Amount,
-			TokenSymbol:     verifyResult.TokenSymbol,
+			TokenSymbol:     tokenSymbol,
 			Network:         requirements.Network,
 			TransactionHash: settlementResult.TransactionHash,
 			SettledAt:       settlementResult.SettledAt,

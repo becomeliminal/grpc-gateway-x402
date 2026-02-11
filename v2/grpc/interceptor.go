@@ -42,6 +42,15 @@ func UnaryServerInterceptor(cfg x402.Config) grpc.UnaryServerInterceptor {
 		}
 		requirements := &accepts[0]
 
+		// Match the client's chosen token against accepted tokens.
+		var tokenSymbol string
+		if payload != nil {
+			if matched, symbol := x402.MatchClientToken(rule, payload); matched != nil {
+				requirements = matched
+				tokenSymbol = symbol
+			}
+		}
+
 		// Verify the payment.
 		verifyResult, err := cfg.Verifier.Verify(ctx, payload, requirements)
 		if err != nil {
@@ -58,12 +67,17 @@ func UnaryServerInterceptor(cfg x402.Config) grpc.UnaryServerInterceptor {
 			return nil, status.Error(codes.Unavailable, fmt.Sprintf("payment settlement failed: %v", err))
 		}
 
+		// Resolve token symbol from rule match or verifier.
+		if tokenSymbol == "" {
+			tokenSymbol = verifyResult.TokenSymbol
+		}
+
 		// Create payment context.
 		paymentCtx := &x402.PaymentContext{
 			Verified:        true,
 			PayerAddress:    verifyResult.PayerAddress,
 			Amount:          verifyResult.Amount,
-			TokenSymbol:     verifyResult.TokenSymbol,
+			TokenSymbol:     tokenSymbol,
 			Network:         requirements.Network,
 			TransactionHash: settlementResult.TransactionHash,
 			SettledAt:       settlementResult.SettledAt,
