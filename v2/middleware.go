@@ -193,7 +193,7 @@ func sendPaymentRequired(w http.ResponseWriter, r *http.Request, rule *PricingRu
 			MaxTimeoutSeconds: int(cfg.ValidityDuration.Seconds()),
 			Extra: map[string]interface{}{
 				"name":    token.TokenName,
-				"version": "2",
+				"version": token.TokenVersion,
 			},
 		})
 	}

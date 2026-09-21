@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -48,6 +49,8 @@ func testConfig() Config {
 						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Recipient:     "0xRecipient",
 						Amount:        "1000000",
+						TokenName:     "USDC",
+						TokenVersion:  "2",
 					},
 				},
 			},
@@ -220,6 +223,82 @@ func TestPaymentMiddleware_402_IncludesPaymentRequiredHeader(t *testing.T) {
 	}
 }
 
+func TestPaymentMiddleware_402_ExtraCarriesEachTokensEIP712Domain(t *testing.T) {
+	// GIVEN an endpoint accepting two tokens whose EIP-712 domains differ
+	cfg := Config{
+		Verifier: &MockVerifier{},
+		EndpointPricing: map[string]PricingRule{
+			"/v1/paid": {
+				AcceptedTokens: []TokenRequirement{
+					{
+						Network:       "eip155:84532",
+						Symbol:        "USDC",
+						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+						Recipient:     "0xRecipient",
+						Amount:        "1000000",
+						TokenName:     "USDC",
+						TokenVersion:  "2",
+					},
+					{
+						Network:       "eip155:8453",
+						Symbol:        "TEST",
+						AssetContract: "0x0000000000000000000000000000000000000001",
+						Recipient:     "0xRecipient",
+						Amount:        "500000",
+						TokenName:     "Test Token",
+						TokenVersion:  "1",
+					},
+				},
+			},
+		},
+	}
+	handler := PaymentMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// WHEN the endpoint is requested without payment
+	req := httptest.NewRequest("GET", "/v1/paid", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// THEN each accepted option's extra carries that token's own domain name
+	// and version, not a shared default
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("expected status 402, got %d", w.Code)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(w.Header().Get(HeaderPaymentRequired))
+	if err != nil {
+		t.Fatalf("PAYMENT-REQUIRED header is not valid base64: %v", err)
+	}
+	var response PaymentRequiredResponse
+	if err := json.Unmarshal(decoded, &response); err != nil {
+		t.Fatalf("PAYMENT-REQUIRED header is not valid JSON: %v", err)
+	}
+	want := []PaymentRequirements{
+		{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "1000000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "USDC", "version": "2"},
+		},
+		{
+			Scheme:            "exact",
+			Network:           "eip155:8453",
+			Amount:            "500000",
+			Asset:             "0x0000000000000000000000000000000000000001",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "Test Token", "version": "1"},
+		},
+	}
+	if !reflect.DeepEqual(response.Accepts, want) {
+		t.Errorf("accepts = %+v, want %+v", response.Accepts, want)
+	}
+}
+
 func TestPaymentMiddleware_V2Header_ValidPayment(t *testing.T) {
 	verifier := &MockVerifier{
 		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
@@ -248,7 +327,7 @@ func TestPaymentMiddleware_V2Header_ValidPayment(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -365,7 +444,7 @@ func TestPaymentMiddleware_V1Header_Fallback(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -453,7 +532,7 @@ func TestPaymentMiddleware_VerificationFailed(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -479,7 +558,7 @@ func TestPaymentMiddleware_SkipPaths(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/*": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -508,7 +587,7 @@ func TestPaymentMiddleware_CustomPaywallHTML(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},

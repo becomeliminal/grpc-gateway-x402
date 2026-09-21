@@ -74,8 +74,15 @@ type TokenRequirement struct {
 	// Amount is the payment amount required in atomic units for this token.
 	Amount string
 
-	// TokenName is the human-readable token name (optional).
+	// TokenName is the name in the token contract's EIP-712 domain, exactly as
+	// its name() returns it (for example "USD Coin"). The exact scheme sends it
+	// as extra.name, and payers sign over it.
 	TokenName string
+
+	// TokenVersion is the version in the token contract's EIP-712 domain,
+	// exactly as its version() returns it (for example "2"). The exact scheme
+	// sends it as extra.version.
+	TokenVersion string
 
 	// TokenDecimals is the number of decimals for this token (optional).
 	TokenDecimals int
@@ -147,6 +154,14 @@ func (t *TokenRequirement) Validate() error {
 
 	if t.Amount == "" {
 		return fmt.Errorf("amount is required")
+	}
+
+	if t.TokenName == "" {
+		return fmt.Errorf("token name is required")
+	}
+
+	if t.TokenVersion == "" {
+		return fmt.Errorf("token version is required")
 	}
 
 	return nil
