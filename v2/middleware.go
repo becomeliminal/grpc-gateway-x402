@@ -53,7 +53,8 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Default requirements from first accepted token (used for V1 legacy).
+			// A V1 payment names no token, so it pays the rule's first accepted
+			// token. A V2 payment names its token and is matched below.
 			requirements := buildRequirementsFromRule(rule)
 
 			// Parse payment header.
@@ -69,14 +70,18 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			// For V2, match the client's chosen token against the rule's accepted tokens
-			// so requirements/symbol are correct for multi-token rules.
+			// For V2, the client's chosen token must be one the rule accepts; the
+			// payment is then held to the rule's requirements for that token,
+			// never to the client's claims.
 			var tokenSymbol string
-			if isV2 && payload != nil {
-				if matched, symbol := MatchClientToken(rule, payload); matched != nil {
-					requirements = matched
-					tokenSymbol = symbol
+			if isV2 {
+				matched, symbol := MatchClientToken(rule, payload)
+				if matched == nil {
+					sendPaymentRequired(w, r, rule, &cfg)
+					return
 				}
+				requirements = matched
+				tokenSymbol = symbol
 			}
 
 			// Verify the payment.
@@ -138,7 +143,7 @@ func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
 }
 
 // buildRequirementsFromRule constructs PaymentRequirements from the first accepted token.
-// Used as a fallback for V1 legacy payments. V2 payments use matchClientToken instead.
+// Used for V1 legacy payments, which name no token. V2 payments use MatchClientToken.
 func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
 	if len(rule.AcceptedTokens) == 0 {
 		return nil

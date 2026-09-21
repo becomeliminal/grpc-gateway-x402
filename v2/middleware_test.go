@@ -299,6 +299,182 @@ func TestPaymentMiddleware_402_ExtraCarriesEachTokensEIP712Domain(t *testing.T) 
 	}
 }
 
+// twoTokenConfig accepts USDC on Base Sepolia or USDC on Arbitrum, each paid to
+// its own recipient, and fails the test if the verifier is ever reached.
+func twoTokenConfig(t *testing.T, verifier ChainVerifier) Config {
+	t.Helper()
+	return Config{
+		Verifier: verifier,
+		EndpointPricing: map[string]PricingRule{
+			"/v1/paid": {
+				AcceptedTokens: []TokenRequirement{
+					{
+						Network:       "eip155:84532",
+						Symbol:        "USDC",
+						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+						Recipient:     "0xRecipientA",
+						Amount:        "1000000",
+						TokenName:     "USDC",
+						TokenVersion:  "2",
+					},
+					{
+						Network:       "eip155:42161",
+						Symbol:        "USDC",
+						AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+						Recipient:     "0xRecipientB",
+						Amount:        "2000000",
+						TokenName:     "USD Coin",
+						TokenVersion:  "2",
+					},
+				},
+			},
+		},
+	}
+}
+
+func encodeV2Payment(t *testing.T, accepted PaymentRequirements) string {
+	t.Helper()
+	payloadJSON, err := json.Marshal(PaymentPayload{
+		X402Version: 2,
+		Accepted:    accepted,
+		Payload: map[string]interface{}{
+			"signature":     "0xsig",
+			"authorization": map[string]interface{}{"from": "0xPayer", "to": accepted.PayTo, "value": accepted.Amount, "nonce": "0xnonce"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal V2 payload: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(payloadJSON)
+}
+
+func TestPaymentMiddleware_V2UnacceptedToken_402WithoutVerifyingOrSettling(t *testing.T) {
+	// GIVEN an endpoint accepting two tokens, and a verifier that must not run
+	verifier := &MockVerifier{
+		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+			t.Errorf("Verify called with requirements %+v", requirements)
+			return &VerificationResult{Valid: true}, nil
+		},
+		SettleFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error) {
+			t.Errorf("Settle called with requirements %+v", requirements)
+			return &SettlementResult{}, nil
+		},
+	}
+	handlerReached := false
+	handler := PaymentMiddleware(twoTokenConfig(t, verifier))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+	}))
+
+	// WHEN a V2 payment arrives in a token the endpoint does not accept
+	req := httptest.NewRequest("GET", "/v1/paid", nil)
+	req.Header.Set(HeaderPaymentSignature, encodeV2Payment(t, PaymentRequirements{
+		Scheme:  "exact",
+		Network: "eip155:84532",
+		Amount:  "1",
+		Asset:   "0x0000000000000000000000000000000000000bad",
+		PayTo:   "0xPayer",
+	}))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// THEN it is refused with the endpoint's payment requirements
+	if w.Code != http.StatusPaymentRequired {
+		t.Errorf("status = %d, want 402", w.Code)
+	}
+	if w.Header().Get(HeaderPaymentRequired) == "" {
+		t.Error("expected PAYMENT-REQUIRED header on the 402")
+	}
+	// AND the protected handler never runs
+	if handlerReached {
+		t.Error("handler reached for a payment in an unaccepted token")
+	}
+}
+
+func TestPaymentMiddleware_V2AcceptedToken_VerifiesAgainstThatTokensRequirements(t *testing.T) {
+	// GIVEN an endpoint accepting two tokens
+	var verified, settled *PaymentRequirements
+	verifier := &MockVerifier{
+		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+			verified = requirements
+			return &VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: "2000000"}, nil
+		},
+		SettleFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error) {
+			settled = requirements
+			return &SettlementResult{TransactionHash: "0xtx", Network: "eip155:42161"}, nil
+		},
+	}
+	handler := PaymentMiddleware(twoTokenConfig(t, verifier))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// WHEN a V2 payment arrives in the second token, claiming a lower amount
+	// and a different recipient than the endpoint set
+	req := httptest.NewRequest("GET", "/v1/paid", nil)
+	req.Header.Set(HeaderPaymentSignature, encodeV2Payment(t, PaymentRequirements{
+		Scheme:  "exact",
+		Network: "eip155:42161",
+		Amount:  "1",
+		Asset:   "0xAF88D065E77C8CC2239327C5EDB3A432268E5831",
+		PayTo:   "0xPayer",
+	}))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// THEN it is verified and settled against the endpoint's own requirements
+	// for that token, not the client's claims
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	want := &PaymentRequirements{
+		Scheme:  "exact",
+		Network: "eip155:42161",
+		Amount:  "2000000",
+		Asset:   "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+		PayTo:   "0xRecipientB",
+	}
+	if !reflect.DeepEqual(verified, want) {
+		t.Errorf("verified against %+v, want %+v", verified, want)
+	}
+	if !reflect.DeepEqual(settled, want) {
+		t.Errorf("settled against %+v, want %+v", settled, want)
+	}
+}
+
+func TestPaymentMiddleware_V1Payment_PaysTheFirstAcceptedToken(t *testing.T) {
+	// GIVEN an endpoint accepting two tokens
+	var verified *PaymentRequirements
+	verifier := &MockVerifier{
+		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+			verified = requirements
+			return &VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: "1000000"}, nil
+		},
+	}
+	handler := PaymentMiddleware(twoTokenConfig(t, verifier))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// WHEN a V1 payment arrives — V1 names no token
+	req := httptest.NewRequest("GET", "/v1/paid", nil)
+	req.Header.Set(HeaderLegacyPayment, makeV1PaymentHeader(t))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// THEN it is verified against the first accepted token
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	want := &PaymentRequirements{
+		Scheme:  "exact",
+		Network: "eip155:84532",
+		Amount:  "1000000",
+		Asset:   "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+		PayTo:   "0xRecipientA",
+	}
+	if !reflect.DeepEqual(verified, want) {
+		t.Errorf("verified against %+v, want %+v", verified, want)
+	}
+}
+
 func TestPaymentMiddleware_V2Header_ValidPayment(t *testing.T) {
 	verifier := &MockVerifier{
 		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {

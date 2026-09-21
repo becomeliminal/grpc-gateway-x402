@@ -40,15 +40,19 @@ func UnaryServerInterceptor(cfg x402.Config) grpc.UnaryServerInterceptor {
 		if len(accepts) == 0 {
 			return nil, status.Error(codes.Internal, "no payment requirements configured")
 		}
+		// A V1 payment names no token, so it pays the rule's first accepted token.
 		requirements := &accepts[0]
 
-		// Match the client's chosen token against accepted tokens.
+		// For V2, the client's chosen token must be one the rule accepts; the
+		// payment is then held to the rule's requirements for that token.
 		var tokenSymbol string
-		if payload != nil {
-			if matched, symbol := x402.MatchClientToken(rule, payload); matched != nil {
-				requirements = matched
-				tokenSymbol = symbol
+		if isV2 {
+			matched, symbol := x402.MatchClientToken(rule, payload)
+			if matched == nil {
+				return nil, sendPaymentRequired(rule, info.FullMethod, &cfg)
 			}
+			requirements = matched
+			tokenSymbol = symbol
 		}
 
 		// Verify the payment.
