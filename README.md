@@ -10,7 +10,7 @@ Payment middleware for gRPC services that implements the [x402 protocol](https:/
 - **V2 protocol**: CAIP-2 networks, structured payment requirements, multi-option 402 responses
 - **V1 backward compatible**: Auto-detects V1 clients, no migration required
 - Multi-currency: Accept any ERC-20 token (USDC, EURC, DAI, USDT, custom tokens)
-- Multi-chain: Arbitrum, Base, Polygon, Avalanche, Gnosis, Codex
+- Multi-chain: Arbitrum, Base, Polygon, Avalanche, Gnosis, Codex, Casper
 - Per-endpoint/method pricing with wildcard pattern matching
 - Payment context propagates to gRPC handlers
 - Custom HTML paywall support with User-Agent detection
@@ -394,6 +394,7 @@ type ChainVerifier interface {
 | `DecodePaymentResponse(header)` | Decode `PAYMENT-RESPONSE` header |
 | `ReadPaymentRequirements(resp)` | Read requirements from 402 response |
 | `evm.NewEVMVerifier(url)` | Create EVM chain verifier |
+| `casper.NewCasperVerifier(url, opts...)` | Create Casper chain verifier |
 
 ## Supported Networks & Token Addresses
 
@@ -413,6 +414,61 @@ type ChainVerifier interface {
 | Network | CAIP-2 | Address |
 |---|---|---|
 | Base | `eip155:8453` | `0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42` |
+
+### wCSPR (Casper)
+
+Casper is not EVM. Accounts are account hashes prefixed by their key algorithm
+(`00` for ED25519, `01` for SECP256K1), not 20-byte `0x` addresses, and the
+asset is a [CEP-18](https://github.com/casper-ecosystem/ceps) token — Casper's
+fungible-token standard — identified by its 64-hex contract package hash rather
+than a contract address.
+
+| Network | CAIP-2 | Asset |
+|---|---|---|
+| Casper Mainnet | `casper:casper` | wCSPR CEP-18 package hash |
+| Casper Testnet | `casper:casper-test` | wCSPR CEP-18 package hash |
+
+```go
+import "github.com/becomeliminal/grpc-gateway-x402/v2/casper"
+
+// Delegates verification and settlement to the public Casper facilitator.
+verifier, err := casper.NewCasperVerifier(casper.DefaultFacilitatorURL)
+
+x402Config := x402.Config{
+    Verifier: verifier,
+    EndpointPricing: map[string]x402.PricingRule{
+        "/v1/premium/*": {
+            AcceptedTokens: []x402.TokenRequirement{
+                {
+                    Network:       casper.NetworkMainnet, // "casper:casper"
+                    AssetContract: "<wCSPR CEP-18 package hash, 64 hex>",
+                    Symbol:        "wCSPR",
+                    Recipient:     "00<64 hex account hash>",
+                    Amount:        "7500000000", // 7.5 wCSPR (9 decimals)
+                    TokenName:     "Wrapped CSPR",
+                    TokenVersion:  "1",
+                    TokenDecimals: 9,
+                },
+            },
+        },
+    },
+}
+```
+
+The facilitator may require an API key, and the HTTP client is injectable:
+
+```go
+verifier, err := casper.NewCasperVerifier(
+    casper.DefaultFacilitatorURL,
+    casper.WithAPIKey(os.Getenv("CSPR_CLOUD_API_KEY")),
+    casper.WithHTTPClient(&http.Client{Timeout: 15 * time.Second}),
+)
+```
+
+The verifier reads its supported networks from the facilitator's `/supported`
+endpoint at construction, so it only advertises what that facilitator can
+actually settle. See [docs.cspr.cloud](https://docs.cspr.cloud) for facilitator
+details.
 
 ## gRPC Transport
 
@@ -458,6 +514,9 @@ verifier, _ := evm.NewEVMVerifier("https://my-facilitator.com")
 
 // Local development
 verifier, _ := evm.NewEVMVerifier("http://localhost:3000")
+
+// Casper facilitator (non-EVM)
+verifier, _ := casper.NewCasperVerifier("https://x402-facilitator.cspr.cloud")
 ```
 
 ### Custom Verification
