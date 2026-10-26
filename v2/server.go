@@ -222,7 +222,8 @@ func (s *Server) Execute(ctx context.Context, call Call, handler Handler) Result
 
 func (s *Server) bindPayment(call Call, rule *PricingRule, accepts []PaymentRequirements, validity time.Duration) (*PaymentRequirements, *PaymentPayload, string, string, Result) {
 	if call.Legacy {
-		if len(rule.AcceptedTokens) != 1 || len(accepts) != 1 {
+		// A V1 payload names no token, so it pays the route's first option.
+		if len(rule.AcceptedTokens) == 0 || len(accepts) == 0 {
 			return nil, nil, "", "", s.required(rule, call, accepts, "payment requirements mismatch")
 		}
 		req := accepts[0]

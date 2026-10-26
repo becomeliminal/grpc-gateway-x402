@@ -513,7 +513,7 @@ The V2 middleware auto-detects V1 clients via header detection:
 - `X-PAYMENT` header → V1 path (responds with `X-PAYMENT-RESPONSE`)
 - `PAYMENT-SIGNATURE` header → V2 path (responds with `PAYMENT-RESPONSE`)
 
-Both work simultaneously. Existing V1 clients require no changes.
+Both work simultaneously. Existing V1 clients require no changes. A V1 payload does not name a token, so a route with several options charges the first one.
 
 ## Examples
 

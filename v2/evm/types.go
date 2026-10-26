@@ -1,7 +1,8 @@
 package evm
 
-// EVMPayload is the EIP-3009 payload shape. The verifier does not parse it.
-// Scheme payloads are forwarded to the facilitator as opaque JSON, so string
+// EVMPayload is the EIP-3009 payload shape.
+// The exact scheme parses it to bind the authorization, then forwards only
+// these fields. Other schemes are forwarded as opaque JSON, so string
 // timestamps and Permit2 bodies are not rejected in this process.
 type EVMPayload struct {
 	Signature     string         `json:"signature"`

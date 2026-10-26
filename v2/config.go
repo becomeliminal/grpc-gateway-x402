@@ -138,6 +138,10 @@ type TokenRequirement struct {
 	// It is required for exact EIP-3009 and is never defaulted.
 	EIP712Version string
 
+	// TokenVersion is the EIP-712 domain version used when EIP712Version is
+	// empty. Callers that set the v2.3.0 field keep sending extra.version.
+	TokenVersion string
+
 	// AssetTransferMethod is omitted from extra when empty or eip3009.
 	// Other methods (permit2, erc7710) are written to extra.
 	AssetTransferMethod string
@@ -157,6 +161,15 @@ func (t TokenRequirement) DomainName() string {
 		return t.EIP712Name
 	}
 	return t.TokenName
+}
+
+// DomainVersion returns the EIP-712 domain version.
+// EIP712Version wins when both fields are set.
+func (t TokenRequirement) DomainVersion() string {
+	if t.EIP712Version != "" {
+		return t.EIP712Version
+	}
+	return t.TokenVersion
 }
 
 // Flow returns the route payment flow. The empty value means authorization.
@@ -251,8 +264,8 @@ func (t *TokenRequirement) Validate() error {
 		if t.DomainName() == "" {
 			return fmt.Errorf("eip712 domain name is required for exact eip3009 (set EIP712Name or TokenName)")
 		}
-		if t.EIP712Version == "" {
-			return fmt.Errorf("eip712 version is required for exact eip3009")
+		if t.DomainVersion() == "" {
+			return fmt.Errorf("eip712 version is required for exact eip3009 (set EIP712Version or TokenVersion)")
 		}
 	}
 

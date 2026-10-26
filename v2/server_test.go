@@ -514,27 +514,39 @@ func TestIdempotentRetrySkipsSettle(t *testing.T) {
 	}
 }
 
-func TestV1HeaderWithSeveralTokensIsRejected(t *testing.T) {
-	v, order := countingVerifier()
-	cfg := pricedConfig(v, "")
-	cfg.EndpointPricing["/v1/paid"] = PricingRule{
-		AcceptedTokens: []TokenRequirement{
-			{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x1", Recipient: "0xRecipient", Amount: "1", EIP712Name: "USD Coin", EIP712Version: "2"},
-			{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x2", Recipient: "0xRecipient", Amount: "1", EIP712Name: "USD Coin", EIP712Version: "2"},
+func TestV1HeaderWithSeveralTokensPaysTheFirst(t *testing.T) {
+	var verified *PaymentRequirements
+	v := &MockVerifier{
+		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+			copied := *requirements
+			verified = &copied
+			return &VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: requirements.Amount}, nil
+		},
+		SettleFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error) {
+			return &SettlementResult{Success: true, TransactionHash: "0xtx", Status: "success", Amount: requirements.Amount, Network: requirements.Network, PayerAddress: "0xPayer"}, nil
 		},
 	}
+	rule := PricingRule{
+		AcceptedTokens: []TokenRequirement{
+			{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x1", Recipient: "0xRecipientA", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+			{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x2", Recipient: "0xRecipientB", Amount: "2000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+		},
+	}
+	cfg := pricedConfig(v, "")
+	cfg.EndpointPricing["/v1/paid"] = rule
 	handler := PaymentMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("handler ran")
+		w.WriteHeader(http.StatusOK)
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
 	req.Header.Set(HeaderLegacyPayment, makeV1PaymentHeader(t))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
-	if w.Code != http.StatusPaymentRequired {
-		t.Fatalf("status = %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", w.Code, w.Body.String())
 	}
-	if len(*order) != 0 {
-		t.Errorf("facilitator calls = %v", *order)
+	want := BuildAccepts(&rule, 5*time.Minute)[0]
+	if verified == nil || !reflect.DeepEqual(*verified, want) {
+		t.Errorf("verified %+v, want %+v", verified, want)
 	}
 }
 

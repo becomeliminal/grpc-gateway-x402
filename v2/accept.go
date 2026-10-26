@@ -39,8 +39,8 @@ func tokenExtra(token TokenRequirement, flow string) map[string]interface{} {
 	if name := token.DomainName(); name != "" {
 		extra["name"] = name
 	}
-	if token.EIP712Version != "" {
-		extra["version"] = token.EIP712Version
+	if version := token.DomainVersion(); version != "" {
+		extra["version"] = version
 	}
 	method := token.AssetTransferMethod
 	if method != "" && !strings.EqualFold(method, "eip3009") {

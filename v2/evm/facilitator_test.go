@@ -200,7 +200,19 @@ func TestSettlePendingIsAResult(t *testing.T) {
 	}
 	defer verifier.Close()
 
-	result, err := verifier.Settle(context.Background(), &x402.PaymentPayload{X402Version: 2, Payload: map[string]interface{}{"sig": "0x"}}, &x402.PaymentRequirements{Amount: "1", Network: "eip155:84532"})
+	payload := &x402.PaymentPayload{
+		X402Version: 2,
+		Accepted:    x402.PaymentRequirements{Scheme: "exact", Network: "eip155:84532", Amount: "1", PayTo: "0xdest"},
+		Payload: map[string]interface{}{
+			"signature": "0xsig",
+			"authorization": map[string]interface{}{
+				"from": "0xpayer", "to": "0xdest", "value": "1",
+				"validAfter": "0", "validBefore": "1", "nonce": "0xnonce",
+			},
+		},
+	}
+	requirements := &x402.PaymentRequirements{Scheme: "exact", Network: "eip155:84532", Amount: "1", Asset: "0xabc", PayTo: "0xdest"}
+	result, err := verifier.Settle(context.Background(), payload, requirements)
 	if err != nil {
 		t.Fatal(err)
 	}

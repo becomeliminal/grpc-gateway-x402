@@ -261,6 +261,15 @@ func TestPricingRuleValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "token version supplies the eip712 version",
+			rule: PricingRule{
+				AcceptedTokens: []TokenRequirement{
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "missing eip712 version",
 			rule: PricingRule{
 				AcceptedTokens: []TokenRequirement{
@@ -482,5 +491,20 @@ func TestBuildAcceptsFromRule(t *testing.T) {
 	// Second token
 	if accepts[1].Network != "eip155:42161" {
 		t.Errorf("expected network 'eip155:42161', got %s", accepts[1].Network)
+	}
+}
+
+func TestTokenVersionIsAdvertisedAsExtraVersion(t *testing.T) {
+	rule := &PricingRule{
+		AcceptedTokens: []TokenRequirement{
+			{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
+		},
+	}
+	accepts := BuildAccepts(rule, 5*time.Minute)
+	if len(accepts) != 1 {
+		t.Fatalf("accepts = %d", len(accepts))
+	}
+	if accepts[0].Extra["name"] != "USD Coin" || accepts[0].Extra["version"] != "2" {
+		t.Errorf("extra = %+v", accepts[0].Extra)
 	}
 }
