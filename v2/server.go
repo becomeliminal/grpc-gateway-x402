@@ -18,6 +18,7 @@ const (
 	OutcomeSettled         = "settled"
 	OutcomeSettleFailed    = "settle_failed"
 	OutcomeReplay          = "replay"
+	OutcomeConflict        = "conflict"
 	OutcomeBufferOverflow  = "buffer_overflow"
 )
 
@@ -47,6 +48,8 @@ type Call struct {
 	Deadline      time.Duration
 	PaymentHeader string
 	Legacy        bool
+	// Method is the HTTP method, or the gRPC full method.
+	Method string
 }
 
 // Result is the payment decision and the handler output an adapter should return.
@@ -201,18 +204,23 @@ func (s *Server) Execute(ctx context.Context, call Call, handler Handler) Result
 		return failed
 	}
 
+	if reason := paymentIdentifierError(rule, payload); reason != "" {
+		return Result{Outcome: OutcomeInvalid, Reason: reason, Legacy: call.Legacy}
+	}
+
 	if id := paymentIdentifier(payload); id != "" {
-		if rec, ok := s.cfg.ReceiptStore.Lookup(id); ok {
-			return replayResult(rec, call.Legacy)
-		}
+		fingerprint := paymentFingerprint(payload, call.RouteKey, call.Method)
 		unlock := s.lockIdentifier(id)
 		defer unlock()
 		if rec, ok := s.cfg.ReceiptStore.Lookup(id); ok {
+			if rec.Fingerprint != "" && rec.Fingerprint != fingerprint {
+				return Result{Outcome: OutcomeConflict, Reason: "payment_identifier_conflict", Legacy: call.Legacy}
+			}
 			return replayResult(rec, call.Legacy)
 		}
 		result := s.runFlow(ctx, call, handler, rule, payload, requirements, symbol, flow)
 		if result.Outcome == OutcomeSettled {
-			s.remember(id, result)
+			s.remember(id, fingerprint, result)
 		}
 		return result
 	}
@@ -285,7 +293,7 @@ func (s *Server) authorization(ctx context.Context, call Call, handler Handler, 
 	if ctx.Err() != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: ctx.Err(), Legacy: call.Legacy}
 	}
-	settled, err := s.cfg.Verifier.Settle(ctx, payload, requirements)
+	settled, err := s.settle(ctx, payload, requirements)
 	if err != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: err, Legacy: call.Legacy}
 	}
@@ -320,7 +328,7 @@ func (s *Server) upfront(ctx context.Context, call Call, handler Handler, payloa
 	if ctx.Err() != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: ctx.Err(), Legacy: call.Legacy}
 	}
-	settled, err := s.cfg.Verifier.Settle(ctx, payload, requirements)
+	settled, err := s.settle(ctx, payload, requirements)
 	if err != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: err, Legacy: call.Legacy}
 	}
@@ -368,7 +376,7 @@ func (s *Server) escrow(ctx context.Context, call Call, handler Handler, payload
 	if ctx.Err() != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: ctx.Err(), Receipt: first.Receipt, Legacy: call.Legacy}
 	}
-	settled, err := s.cfg.Verifier.Settle(ctx, payload, requirements)
+	settled, err := s.settle(ctx, payload, requirements)
 	if err != nil {
 		return Result{Outcome: OutcomeInternal, Reason: "facilitator_error", Err: err, Receipt: first.Receipt, Legacy: call.Legacy}
 	}
@@ -509,17 +517,32 @@ func (s *Server) noteExtensions(responses map[string]interface{}) {
 	s.cfg.OnExtensionResponses(responses)
 }
 
-func (s *Server) remember(id string, result Result) {
+// settle calls the facilitator. A non-terminal settlement_pending result with
+// a transaction hash is tried once more with the same payload and requirements.
+func (s *Server) settle(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error) {
+	settled, err := s.cfg.Verifier.Settle(ctx, payload, requirements)
+	if err != nil || !retryablePending(settled) {
+		return settled, err
+	}
+	return s.cfg.Verifier.Settle(ctx, payload, requirements)
+}
+
+func retryablePending(settled *SettlementResult) bool {
+	return settled != nil && !settled.Success && settled.ErrorReason == "settlement_pending" && settled.TransactionHash != ""
+}
+
+func (s *Server) remember(id, fingerprint string, result Result) {
 	if result.Receipt == nil {
 		return
 	}
 	rec := ReceiptRecord{
-		Payment:    *result.Receipt,
-		StatusCode: result.Output.Status,
-		Body:       result.Output.Body,
-		Header:     result.Output.Header,
-		GRPCResp:   result.Output.GRPC,
-		HasGRPC:    result.Output.HasGRPC,
+		Payment:     *result.Receipt,
+		StatusCode:  result.Output.Status,
+		Body:        result.Output.Body,
+		Header:      result.Output.Header,
+		GRPCResp:    result.Output.GRPC,
+		HasGRPC:     result.Output.HasGRPC,
+		Fingerprint: fingerprint,
 	}
 	if rec.StatusCode == 0 {
 		rec.StatusCode = 200

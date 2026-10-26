@@ -73,6 +73,7 @@ func (s *Server) serveHTTP(next http.Handler, w http.ResponseWriter, r *http.Req
 		Deadline:      deadline,
 		PaymentHeader: header,
 		Legacy:        legacy,
+		Method:        r.Method,
 	}
 
 	result := s.Execute(r.Context(), call, func(ctx context.Context) (HandlerOutput, error) {
@@ -113,7 +114,10 @@ func (s *Server) writeHTTP(w http.ResponseWriter, r *http.Request, bw *bufferWri
 		s.writeChallenge(w, r, result)
 	case OutcomeInvalid:
 		applyCORS(w.Header(), r)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payment header"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPaymentMessage(result.Reason)})
+	case OutcomeConflict:
+		applyCORS(w.Header(), r)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "payment_identifier_conflict"})
 	case OutcomeInternal:
 		applyCORS(w.Header(), r)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "facilitator request failed"})
@@ -222,6 +226,15 @@ func setReceiptHeader(h http.Header, result Result) {
 		return
 	}
 	h.Set(HeaderPaymentResponse, encoded)
+}
+
+func invalidPaymentMessage(reason string) string {
+	switch reason {
+	case "payment_identifier_required", "invalid_payment_identifier":
+		return reason
+	default:
+		return "invalid payment header"
+	}
 }
 
 func encodeJSON(v interface{}) (string, error) {

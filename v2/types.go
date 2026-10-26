@@ -72,6 +72,7 @@ type VerificationResult struct {
 // Success is false for a decoded settlement failure, including settlement_pending.
 // A transport failure is returned as an error instead of a result.
 // TransactionHash is kept when the facilitator reports one, including settlement_pending.
+// The resource server retries settlement_pending once when the hash is non-empty.
 type SettlementResult struct {
 	Success            bool
 	ErrorReason        string

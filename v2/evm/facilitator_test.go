@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -219,6 +220,147 @@ func TestSettlePendingIsAResult(t *testing.T) {
 	if result.Success || result.ErrorReason != "settlement_pending" || result.TransactionHash != "0xpending" {
 		t.Errorf("result = %+v", result)
 	}
+}
+
+func TestFacilitatorDecodesAPaymentFailureBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("EXTENSION-RESPONSES", base64.StdEncoding.EncodeToString([]byte(`{"bazaar":{"status":"ok"}}`)))
+		w.WriteHeader(http.StatusBadRequest)
+		switch r.URL.Path {
+		case "/verify":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"isValid":       false,
+				"invalidReason": "invalid_signature",
+				"payer":         "0xpayer",
+			})
+		case "/settle":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":     false,
+				"errorReason": "insufficient_allowance",
+				"transaction": "",
+				"network":     "eip155:84532",
+				"payer":       "0xpayer",
+			})
+		default:
+			_, _ = w.Write([]byte("Bad request"))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewFacilitatorClient(srv.URL)
+	verified, err := client.Verify(context.Background(), &FacilitatorVerifyRequest{X402Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.IsValid || verified.InvalidReason != "invalid_signature" || verified.Payer != "0xpayer" {
+		t.Errorf("verify = %+v", verified)
+	}
+	if verified.ExtensionResponses["bazaar"] == nil {
+		t.Errorf("extension responses = %+v", verified.ExtensionResponses)
+	}
+
+	settled, err := client.Settle(context.Background(), &FacilitatorSettleRequest{X402Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Success || settled.ErrorReason != "insufficient_allowance" || settled.Transaction != "" || settled.Network != "eip155:84532" {
+		t.Errorf("settle = %+v", settled)
+	}
+
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Bad request"))
+	}))
+	defer plain.Close()
+	client = NewFacilitatorClient(plain.URL)
+	if _, err := client.Verify(context.Background(), &FacilitatorVerifyRequest{X402Version: 2}); err == nil {
+		t.Fatal("expected transport error for a plain 400")
+	}
+
+	okFalse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"isValid":       false,
+			"invalidReason": "insufficient_funds",
+			"payer":         "0xpayer",
+		})
+	}))
+	defer okFalse.Close()
+	client = NewFacilitatorClient(okFalse.URL)
+	verified, err = client.Verify(context.Background(), &FacilitatorVerifyRequest{X402Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified.IsValid || verified.InvalidReason != "insufficient_funds" {
+		t.Errorf("verify = %+v", verified)
+	}
+}
+
+func TestFacilitatorRejectsAnOversizedBody(t *testing.T) {
+	calls := []struct {
+		name   string
+		status int
+		run    func(*FacilitatorClient) error
+	}{
+		{name: "verify", status: http.StatusOK, run: func(c *FacilitatorClient) error {
+			_, err := c.Verify(context.Background(), &FacilitatorVerifyRequest{X402Version: 2})
+			return err
+		}},
+		{name: "settle", status: http.StatusInternalServerError, run: func(c *FacilitatorClient) error {
+			_, err := c.Settle(context.Background(), &FacilitatorSettleRequest{X402Version: 2})
+			return err
+		}},
+		{name: "supported", status: http.StatusTooManyRequests, run: func(c *FacilitatorClient) error {
+			_, err := c.GetSupported(context.Background())
+			return err
+		}},
+	}
+	for _, tt := range calls {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts int
+			body := &closeBody{Reader: io.LimitReader(zeroReader{}, maxResponseBytes+1)}
+			client := NewFacilitatorClient("https://facilitator.example")
+			client.SetHTTPClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				attempts++
+				return &http.Response{
+					StatusCode: tt.status,
+					Header:     make(http.Header),
+					Body:       body,
+				}, nil
+			})})
+			if err := tt.run(client); err == nil {
+				t.Fatal("expected an oversized body to fail")
+			}
+			if !body.closed {
+				t.Fatal("response body was not closed")
+			}
+			if attempts != 1 {
+				t.Errorf("attempts = %d", attempts)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
+type closeBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *closeBody) Close() error {
+	b.closed = true
+	return nil
 }
 
 type staticAuth struct{}

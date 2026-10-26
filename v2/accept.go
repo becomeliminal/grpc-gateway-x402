@@ -3,6 +3,7 @@ package x402
 import (
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -119,7 +120,8 @@ func extraSubset(server, client map[string]interface{}) bool {
 
 // extensionsPreserved reports whether the client kept every server-supplied
 // extension info value. A missing extension key is allowed. Extra client
-// fields are allowed. A present key with a changed or missing info value is not.
+// fields are allowed, including fields added inside info. A present key with
+// a changed or missing info value is not. Arrays and scalars must match exactly.
 func extensionsPreserved(server, client map[string]interface{}) bool {
 	for key, serverVal := range server {
 		clientVal, ok := client[key]
@@ -147,7 +149,26 @@ func extensionValuePreserved(serverVal, clientVal interface{}) bool {
 	if !ok {
 		return false
 	}
-	return reflect.DeepEqual(canonicalJSON(info), canonicalJSON(clientInfo))
+	return valueSubset(info, clientInfo)
+}
+
+// valueSubset reports whether client keeps every value server supplied.
+// Maps may gain keys. Arrays and scalars must be equal.
+func valueSubset(server, client interface{}) bool {
+	server = canonicalJSON(server)
+	client = canonicalJSON(client)
+	serverMap, serverOK := server.(map[string]interface{})
+	clientMap, clientOK := client.(map[string]interface{})
+	if serverOK && clientOK {
+		for key, want := range serverMap {
+			got, ok := clientMap[key]
+			if !ok || !valueSubset(want, got) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(server, client)
 }
 
 func canonicalJSON(v interface{}) interface{} {
@@ -183,6 +204,70 @@ func resolveFlow(routeFlow string, extra map[string]interface{}) (string, bool) 
 		return "", false
 	}
 	return flow, true
+}
+
+var paymentIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+
+func paymentIdentifierRequired(extensions map[string]interface{}) bool {
+	raw, ok := extensions[ExtensionPaymentIdentifier]
+	if !ok || raw == nil {
+		return false
+	}
+	ext, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	info, ok := ext["info"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	required, ok := info["required"].(bool)
+	return ok && required
+}
+
+func validPaymentID(id string) bool {
+	return paymentIDPattern.MatchString(id)
+}
+
+func paymentIdentifierError(rule *PricingRule, payload *PaymentPayload) string {
+	id := paymentIdentifier(payload)
+	if id == "" {
+		if rule != nil && paymentIdentifierRequired(rule.Extensions) {
+			return "payment_identifier_required"
+		}
+		return ""
+	}
+	if !validPaymentID(id) {
+		return "invalid_payment_identifier"
+	}
+	return ""
+}
+
+func paymentFingerprint(payload *PaymentPayload, routeKey, method string) string {
+	if payload == nil {
+		return ""
+	}
+	raw, err := json.Marshal(struct {
+		X402Version int                    `json:"x402Version"`
+		Resource    *ResourceInfo          `json:"resource,omitempty"`
+		Accepted    PaymentRequirements    `json:"accepted"`
+		Payload     interface{}            `json:"payload,omitempty"`
+		Extensions  map[string]interface{} `json:"extensions,omitempty"`
+		Route       string                 `json:"route"`
+		Method      string                 `json:"method"`
+	}{
+		X402Version: payload.X402Version,
+		Resource:    payload.Resource,
+		Accepted:    payload.Accepted,
+		Payload:     payload.Payload,
+		Extensions:  payload.Extensions,
+		Route:       routeKey,
+		Method:      method,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 func paymentIdentifier(payload *PaymentPayload) string {

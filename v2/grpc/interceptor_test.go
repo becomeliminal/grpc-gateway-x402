@@ -223,6 +223,39 @@ func TestUnarySettleFailureDiscardsResponse(t *testing.T) {
 	if receipt.Success || receipt.Transaction != "0xpending" {
 		t.Errorf("receipt = %+v", receipt)
 	}
+	if mock.settle != 2 {
+		t.Errorf("settle calls = %d", mock.settle)
+	}
+}
+
+func TestUnaryPaymentIdentifierConflict(t *testing.T) {
+	mock := &grpcMock{}
+	interceptor := UnaryServerInterceptor(paidConfig(mock))
+	const id = "pay_7d5d747be160e280"
+	first := mustPayloadWithID(t, id, "0xsig")
+	ctx, _ := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, first)))
+	resp, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return "secret", nil
+	})
+	if err != nil || resp != "secret" {
+		t.Fatalf("first call resp %v err %v", resp, err)
+	}
+
+	second := mustPayloadWithID(t, id, "0xother")
+	ctx, _ = withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, second)))
+	_, err = interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Error("handler ran")
+		return "secret", nil
+	})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("code = %v", err)
+	}
+	if status.Convert(err).Message() != "payment_identifier_conflict" {
+		t.Fatalf("message = %s", status.Convert(err).Message())
+	}
+	if mock.settle != 1 {
+		t.Errorf("settle calls = %d", mock.settle)
+	}
 }
 
 func TestUnaryHandlerErrorDoesNotSettle(t *testing.T) {
@@ -251,6 +284,32 @@ func mustPayload(t *testing.T) string {
 			Extra:             map[string]interface{}{"name": "USD Coin", "version": "2"},
 		},
 		Payload: map[string]interface{}{"signature": "0xsig"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header
+}
+
+func mustPayloadWithID(t *testing.T, id, signature string) string {
+	t.Helper()
+	header, err := EncodePaymentPayload(&x402.PaymentPayload{
+		X402Version: 2,
+		Accepted: x402.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "1000000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "USD Coin", "version": "2"},
+		},
+		Payload: map[string]interface{}{"signature": signature},
+		Extensions: map[string]interface{}{
+			x402.ExtensionPaymentIdentifier: map[string]interface{}{
+				"info": map[string]interface{}{"id": id},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -341,7 +341,7 @@ func TestPaymentFlows(t *testing.T) {
 			handler:   http.StatusOK,
 			settle:    &SettlementResult{Success: false, ErrorReason: "settlement_pending", TransactionHash: "0xpending", Network: "eip155:84532", PayerAddress: "0xPayer"},
 			wantCode:  http.StatusPaymentRequired,
-			wantOrder: []string{"verify", "handler", "settle"},
+			wantOrder: []string{"verify", "handler", "settle", "settle"},
 			wantHash:  "0xpending",
 		},
 	}
@@ -496,7 +496,7 @@ func TestIdempotentRetrySkipsSettle(t *testing.T) {
 		_, _ = w.Write([]byte("once"))
 	}))
 
-	payload := paymentWithID(t, "pay_123")
+	payload := paymentWithID(t, "pay_7d5d747be160e280")
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
 		req.Header.Set(HeaderPaymentSignature, payload)
@@ -584,6 +584,302 @@ func TestExtensionInfoMustBePreserved(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("omitted extension status = %d body %s", w.Code, w.Body.String())
+	}
+
+	appended := paymentWithExtensions(t, map[string]interface{}{
+		"bazaar": map[string]interface{}{"info": map[string]interface{}{"category": "data", "clientOnly": "ok"}},
+		ExtensionPaymentIdentifier: map[string]interface{}{
+			"info": map[string]interface{}{"required": true, "id": "pay_7d5d747be160e280"},
+		},
+	})
+	rule.Extensions[ExtensionPaymentIdentifier] = map[string]interface{}{
+		"info": map[string]interface{}{"required": true},
+	}
+	cfg.EndpointPricing["/v1/paid"] = rule
+	handler = PaymentMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	req = httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+	req.Header.Set(HeaderPaymentSignature, appended)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("appended info status = %d body %s", w.Code, w.Body.String())
+	}
+
+	deleted := paymentWithExtensions(t, map[string]interface{}{
+		"bazaar": map[string]interface{}{"info": map[string]interface{}{}},
+	})
+	req = httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+	req.Header.Set(HeaderPaymentSignature, deleted)
+	w = httptest.NewRecorder()
+	*order = nil
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("deleted info status = %d", w.Code)
+	}
+	if len(*order) != 0 {
+		t.Errorf("facilitator was called for a deleted extension field: %v", *order)
+	}
+}
+
+func TestPaymentIdentifierRules(t *testing.T) {
+	const id = "pay_7d5d747be160e280"
+
+	t.Run("required and missing", func(t *testing.T) {
+		v, order := countingVerifier()
+		cfg := pricedConfig(v, "")
+		rule := cfg.EndpointPricing["/v1/paid"]
+		rule.Extensions = map[string]interface{}{
+			ExtensionPaymentIdentifier: map[string]interface{}{
+				"info": map[string]interface{}{"required": true},
+			},
+		}
+		cfg.EndpointPricing["/v1/paid"] = rule
+		handler := PaymentMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler ran")
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+		req.Header.Set(HeaderPaymentSignature, makeV2PaymentHeader(t))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "payment_identifier_required") {
+			t.Fatalf("status %d body %s", w.Code, w.Body.String())
+		}
+		if len(*order) != 0 {
+			t.Errorf("facilitator calls = %v", *order)
+		}
+	})
+
+	t.Run("rejects a short id", func(t *testing.T) {
+		v, order := countingVerifier()
+		handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler ran")
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+		req.Header.Set(HeaderPaymentSignature, paymentWithID(t, "short"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_payment_identifier") {
+			t.Fatalf("status %d body %s", w.Code, w.Body.String())
+		}
+		if len(*order) != 0 {
+			t.Errorf("facilitator calls = %v", *order)
+		}
+	})
+
+	t.Run("rejects a bad character", func(t *testing.T) {
+		v, _ := countingVerifier()
+		handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler ran")
+		}))
+		req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+		req.Header.Set(HeaderPaymentSignature, paymentWithID(t, "pay_has a space!!"))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_payment_identifier") {
+			t.Fatalf("status %d body %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("same payload replays", func(t *testing.T) {
+		v, order := countingVerifier()
+		handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("once"))
+		}))
+		header := paymentWithID(t, id)
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+			req.Header.Set(HeaderPaymentSignature, header)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("try %d status %d", i, w.Code)
+			}
+		}
+		if !reflect.DeepEqual(*order, []string{"verify", "settle"}) {
+			t.Errorf("order = %v", *order)
+		}
+	})
+
+	t.Run("different payload conflicts", func(t *testing.T) {
+		v, order := countingVerifier()
+		handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("once"))
+		}))
+		first := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+		first.Header.Set(HeaderPaymentSignature, paymentWithID(t, id))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, first)
+		if w.Code != http.StatusOK {
+			t.Fatalf("first status %d", w.Code)
+		}
+
+		second := httptest.NewRequest(http.MethodPost, "/v1/paid", nil)
+		second.Header.Set(HeaderPaymentSignature, paymentWithID(t, id))
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, second)
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "payment_identifier_conflict") {
+			t.Fatalf("second status %d body %s", w.Code, w.Body.String())
+		}
+		if w.Header().Get(HeaderPaymentResponse) != "" {
+			t.Error("conflict returned a receipt")
+		}
+		settles := 0
+		for _, step := range *order {
+			if step == "settle" {
+				settles++
+			}
+		}
+		if settles != 1 {
+			t.Errorf("settle calls = %d, order %v", settles, *order)
+		}
+	})
+}
+
+func TestVerifyFailureReasonIsTheChallengeError(t *testing.T) {
+	v := &MockVerifier{
+		VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+			return &VerificationResult{Valid: false, Reason: "invalid_signature"}, nil
+		},
+	}
+	ran := false
+	handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran = true
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+	req.Header.Set(HeaderPaymentSignature, makeV2PaymentHeader(t))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if ran {
+		t.Fatal("handler ran")
+	}
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d", w.Code)
+	}
+	if decodeRequired(t, w).Error != "invalid_signature" {
+		t.Fatalf("challenge = %+v", decodeRequired(t, w))
+	}
+}
+
+func TestSettlementPendingRetriesOnce(t *testing.T) {
+	pending := func(hash string) *SettlementResult {
+		return &SettlementResult{Success: false, ErrorReason: "settlement_pending", TransactionHash: hash, Network: "eip155:84532", PayerAddress: "0xPayer"}
+	}
+	tests := []struct {
+		name        string
+		results     []*SettlementResult
+		wantSettles int
+		wantCode    int
+		wantHash    string
+		wantSuccess bool
+	}{
+		{
+			name:        "pending then success",
+			results:     []*SettlementResult{pending("0xpending"), {Success: true, TransactionHash: "0xconfirmed", Network: "eip155:84532", PayerAddress: "0xPayer"}},
+			wantSettles: 2,
+			wantCode:    http.StatusOK,
+			wantHash:    "0xconfirmed",
+			wantSuccess: true,
+		},
+		{
+			name:        "terminal failure",
+			results:     []*SettlementResult{{Success: false, ErrorReason: "insufficient_funds", TransactionHash: "", Network: "eip155:84532"}},
+			wantSettles: 1,
+			wantCode:    http.StatusPaymentRequired,
+			wantHash:    "",
+		},
+		{
+			name:        "pending with an empty hash",
+			results:     []*SettlementResult{pending("")},
+			wantSettles: 1,
+			wantCode:    http.StatusPaymentRequired,
+			wantHash:    "",
+		},
+		{
+			name:        "pending then pending",
+			results:     []*SettlementResult{pending("0xfirst"), pending("0xsecond")},
+			wantSettles: 2,
+			wantCode:    http.StatusPaymentRequired,
+			wantHash:    "0xsecond",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			v := &MockVerifier{
+				VerifyFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*VerificationResult, error) {
+					return &VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: requirements.Amount}, nil
+				},
+				SettleFunc: func(ctx context.Context, payload *PaymentPayload, requirements *PaymentRequirements) (*SettlementResult, error) {
+					i := calls
+					calls++
+					if i >= len(tt.results) {
+						t.Fatalf("unexpected settle call %d", i)
+					}
+					return tt.results[i], nil
+				},
+			}
+			handler := PaymentMiddleware(pricedConfig(v, ""))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("paid-body"))
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+			req.Header.Set(HeaderPaymentSignature, makeV2PaymentHeader(t))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if calls != tt.wantSettles {
+				t.Errorf("settle calls = %d, want %d", calls, tt.wantSettles)
+			}
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d body %s", w.Code, w.Body.String())
+			}
+			receipt := decodeReceipt(t, w.Header().Get(HeaderPaymentResponse))
+			if receipt.Success != tt.wantSuccess || receipt.Transaction != tt.wantHash {
+				t.Errorf("receipt = %+v", receipt)
+			}
+		})
+	}
+}
+
+func TestUncleanPathDoesNotRunThePaidHandler(t *testing.T) {
+	paid := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/paid", func(w http.ResponseWriter, r *http.Request) {
+		paid = true
+		_, _ = w.Write([]byte("secret"))
+	})
+	handler := PaymentMiddleware(pricedConfig(&MockVerifier{}, ""))(mux)
+
+	paths := []string{"/v1/paid/", "/v1//paid", "/v1/other/../paid"}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			paid = false
+			req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+			req.URL.Path = path
+			req.URL.RawPath = path
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if paid {
+				t.Fatalf("paid handler ran for %s (status %d)", path, w.Code)
+			}
+			if w.Code == http.StatusPaymentRequired {
+				return
+			}
+			if w.Code != http.StatusMovedPermanently && w.Code != http.StatusNotFound {
+				t.Fatalf("status = %d", w.Code)
+			}
+		})
+	}
+
+	paid = false
+	req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if paid {
+		t.Fatal("unpaid request ran the handler")
+	}
+	if w.Code != http.StatusPaymentRequired {
+		t.Fatalf("clean path status = %d", w.Code)
 	}
 }
 

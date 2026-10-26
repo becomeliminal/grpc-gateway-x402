@@ -8,12 +8,13 @@ import (
 // ReceiptRecord is a settled response remembered for a payment identifier.
 // A retry with the same id returns this record and does not call /settle again.
 type ReceiptRecord struct {
-	Payment    PaymentResponse
-	StatusCode int
-	Body       []byte
-	Header     map[string][]string
-	GRPCResp   interface{}
-	HasGRPC    bool
+	Payment     PaymentResponse
+	StatusCode  int
+	Body        []byte
+	Header      map[string][]string
+	GRPCResp    interface{}
+	HasGRPC     bool
+	Fingerprint string
 }
 
 // ReceiptStore is a bounded TTL cache of settled receipts.

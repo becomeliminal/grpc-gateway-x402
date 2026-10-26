@@ -54,6 +54,7 @@ func callFromContext(ctx context.Context, fullMethod string) x402.Call {
 		Deadline:      deadline,
 		PaymentHeader: header,
 		Legacy:        legacy,
+		Method:        fullMethod,
 	}
 }
 
@@ -64,7 +65,13 @@ func finishCall(ctx context.Context, result x402.Result) (interface{}, error) {
 	case x402.OutcomePaymentRequired:
 		return nil, paymentRequiredError(ctx, result)
 	case x402.OutcomeInvalid:
-		return nil, status.Error(codes.InvalidArgument, "invalid_payment")
+		reason := result.Reason
+		if reason == "" {
+			reason = "invalid_payment"
+		}
+		return nil, status.Error(codes.InvalidArgument, reason)
+	case x402.OutcomeConflict:
+		return nil, status.Error(codes.AlreadyExists, result.Reason)
 	case x402.OutcomeInternal, x402.OutcomeBufferOverflow:
 		return nil, status.Error(codes.Internal, result.Reason)
 	case x402.OutcomeHandlerFailed:

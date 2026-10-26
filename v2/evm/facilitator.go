@@ -109,6 +109,14 @@ func (c *FacilitatorClient) Verify(ctx context.Context, req *FacilitatorVerifyRe
 	if err != nil {
 		return nil, err
 	}
+	if body.status != http.StatusOK {
+		parsed, ok := decodeVerifyFailure(body.payload)
+		if !ok {
+			return nil, fmt.Errorf("facilitator /verify returned status %d: %s", body.status, excerpt(body.payload))
+		}
+		parsed.ExtensionResponses = body.extensions
+		return parsed, nil
+	}
 
 	parsed, err := parseVerify(body.payload)
 	if err != nil {
@@ -127,6 +135,14 @@ func (c *FacilitatorClient) Settle(ctx context.Context, req *FacilitatorSettleRe
 	body, err := c.post(ctx, "/settle", req, func(h AuthHeaders) map[string]string { return h.Settle })
 	if err != nil {
 		return nil, err
+	}
+	if body.status != http.StatusOK {
+		parsed, ok := decodeSettleFailure(body.payload)
+		if !ok {
+			return nil, fmt.Errorf("facilitator /settle returned status %d: %s", body.status, excerpt(body.payload))
+		}
+		parsed.ExtensionResponses = body.extensions
+		return parsed, nil
 	}
 
 	parsed, err := parseSettle(body.payload)
@@ -199,6 +215,7 @@ func (c *FacilitatorClient) getSupportedOnce(ctx context.Context) (*x402.Support
 type httpBody struct {
 	payload    []byte
 	extensions map[string]interface{}
+	status     int
 }
 
 func (c *FacilitatorClient) post(ctx context.Context, path string, payload interface{}, headers func(AuthHeaders) map[string]string) (httpBody, error) {
@@ -225,10 +242,7 @@ func (c *FacilitatorClient) post(ctx context.Context, path string, payload inter
 	if err != nil {
 		return httpBody{}, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return httpBody{}, fmt.Errorf("facilitator %s returned status %d: %s", path, resp.StatusCode, excerpt(body))
-	}
-	return httpBody{payload: body, extensions: extensionResponses(resp.Header)}, nil
+	return httpBody{payload: body, extensions: extensionResponses(resp.Header), status: resp.StatusCode}, nil
 }
 
 func (c *FacilitatorClient) applyAuth(ctx context.Context, req *http.Request, pick func(AuthHeaders) map[string]string) error {
@@ -313,6 +327,43 @@ type verifyEnvelope struct {
 	InvalidReason string                 `json:"invalidReason,omitempty"`
 	Payer         string                 `json:"payer,omitempty"`
 	Extensions    map[string]interface{} `json:"extensions,omitempty"`
+}
+
+func decodeVerifyFailure(body []byte) (*FacilitatorVerifyResponse, bool) {
+	var env verifyEnvelope
+	if err := json.Unmarshal(body, &env); err != nil || env.InvalidReason == "" {
+		return nil, false
+	}
+	return &FacilitatorVerifyResponse{
+		IsValid:       false,
+		InvalidReason: env.InvalidReason,
+		Payer:         env.Payer,
+		Extensions:    env.Extensions,
+	}, true
+}
+
+func decodeSettleFailure(body []byte) (*FacilitatorSettleResponse, bool) {
+	var env settleEnvelope
+	if err := json.Unmarshal(body, &env); err != nil || env.ErrorReason == "" {
+		return nil, false
+	}
+	transaction := ""
+	if env.Transaction != nil {
+		transaction = *env.Transaction
+	}
+	network := ""
+	if env.Network != nil {
+		network = *env.Network
+	}
+	return &FacilitatorSettleResponse{
+		Success:     false,
+		ErrorReason: env.ErrorReason,
+		Payer:       env.Payer,
+		Transaction: transaction,
+		Network:     network,
+		Amount:      env.Amount,
+		Extensions:  env.Extensions,
+	}, true
 }
 
 func parseVerify(body []byte) (*FacilitatorVerifyResponse, error) {
