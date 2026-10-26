@@ -32,7 +32,7 @@ This example demonstrates advanced x402 features:
 ## Running
 
 ```bash
-export FACILITATOR_URL="https://facilitator.x402.org"
+export FACILITATOR_URL="https://x402.org/facilitator"
 export RECIPIENT_ADDRESS="0xYourAddress"
 go run main.go
 ```

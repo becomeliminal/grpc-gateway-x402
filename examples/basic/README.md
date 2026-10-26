@@ -11,7 +11,7 @@ This example demonstrates how to integrate x402 payment middleware with a simple
 ## Prerequisites
 
 1. Go 1.21 or later
-2. A Coinbase x402 facilitator URL (e.g., `https://facilitator.x402.org`)
+2. A Coinbase x402 facilitator URL (e.g., `https://x402.org/facilitator`)
 3. An Ethereum address to receive payments
 
 ## Running the Example
@@ -19,7 +19,7 @@ This example demonstrates how to integrate x402 payment middleware with a simple
 1. Set environment variables:
 
 ```bash
-export FACILITATOR_URL="https://facilitator.x402.org"
+export FACILITATOR_URL="https://x402.org/facilitator"
 export RECIPIENT_ADDRESS="0xYourEthereumAddress"
 ```
 
@@ -49,7 +49,7 @@ The example accepts USDC payments on Base Sepolia network:
 
 - **Amount**: $0.01 (1 cent)
 - **Token**: USDC
-- **Network**: base-sepolia
+- **Network**: eip155:84532 (Base Sepolia)
 - **Recipient**: Your configured address
 
 ## Code Structure

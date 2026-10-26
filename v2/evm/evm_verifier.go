@@ -2,133 +2,162 @@ package evm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
 )
 
-// EVMVerifier implements ChainVerifier for EVM-compatible chains using a facilitator service.
+const supportedRefresh = 10 * time.Minute
+
+// EVMVerifier settles through a facilitator. Payment payloads are opaque:
+// this process does not parse EIP-3009, Permit2, or other scheme bodies.
 type EVMVerifier struct {
 	facilitator *FacilitatorClient
-	kinds       []x402.SupportedKind
+
+	mu    sync.RWMutex
+	kinds []x402.SupportedKind
+
+	stop chan struct{}
+	done chan struct{}
+	once sync.Once
 }
 
-// NewEVMVerifier creates a new EVM verifier that delegates to a facilitator service.
+// NewEVMVerifier fetches /supported once and fails closed when that call fails.
+// A background refresh updates the cached kinds. A request never calls /supported.
 func NewEVMVerifier(facilitatorURL string) (*EVMVerifier, error) {
 	client := NewFacilitatorClient(facilitatorURL)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	supported, err := client.GetSupported(ctx)
 	if err != nil {
+		client.Close()
 		return nil, fmt.Errorf("failed to fetch supported kinds: %w", err)
 	}
 
-	kinds := make([]x402.SupportedKind, 0, len(supported.Kinds))
-	for _, k := range supported.Kinds {
-		kinds = append(kinds, x402.SupportedKind{
-			Scheme:  k.Scheme,
-			Network: k.Network,
-		})
-	}
-
-	return &EVMVerifier{
+	v := &EVMVerifier{
 		facilitator: client,
-		kinds:       kinds,
-	}, nil
+		kinds:       append([]x402.SupportedKind(nil), supported.Kinds...),
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
+	}
+	go v.refreshLoop()
+	return v, nil
 }
 
-// Verify checks if a payment is valid without settling it.
+// Close stops the background refresh and closes idle facilitator connections.
+func (v *EVMVerifier) Close() {
+	v.once.Do(func() {
+		close(v.stop)
+		<-v.done
+		v.facilitator.Close()
+	})
+}
+
+// Verify forwards the payload and requirements to POST /verify.
 func (v *EVMVerifier) Verify(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.VerificationResult, error) {
-	evmPayload, err := parseEVMPayload(payload.Payload)
-	if err != nil {
-		return &x402.VerificationResult{
-			Valid:  false,
-			Reason: fmt.Sprintf("invalid payload: %v", err),
-		}, nil
-	}
-
-	verifyReq := &FacilitatorVerifyRequest{
-		Payload:      payload,
-		Requirements: requirements,
-	}
-
-	verifyResp, err := v.facilitator.Verify(ctx, verifyReq)
+	resp, err := v.facilitator.Verify(ctx, &FacilitatorPaymentRequest{
+		X402Version:         versionOf(payload),
+		PaymentPayload:      payload,
+		PaymentRequirements: requirements,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("facilitator verification failed: %w", err)
 	}
-
+	amount := ""
+	if requirements != nil {
+		amount = requirements.Amount
+	}
 	return &x402.VerificationResult{
-		Valid:        verifyResp.IsValid,
-		Reason:       verifyResp.InvalidReason,
-		PayerAddress: evmPayload.Authorization.From,
-		Amount:       evmPayload.Authorization.Value,
+		Valid:              resp.IsValid,
+		Reason:             resp.InvalidReason,
+		PayerAddress:       resp.Payer,
+		Amount:             amount,
+		Extensions:         resp.Extensions,
+		ExtensionResponses: resp.ExtensionResponses,
 	}, nil
 }
 
-// Settle executes the payment on-chain and returns settlement details.
+// Settle forwards the payload and requirements to POST /settle.
+// A decoded failure, including settlement_pending, is a result with Success false.
 func (v *EVMVerifier) Settle(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.SettlementResult, error) {
-	evmPayload, err := parseEVMPayload(payload.Payload)
-	if err != nil {
-		return nil, fmt.Errorf("invalid payload: %w", err)
-	}
-
-	settleReq := &FacilitatorSettleRequest{
-		Payload:      payload,
-		Requirements: requirements,
-	}
-
-	settleResp, err := v.facilitator.Settle(ctx, settleReq)
+	resp, err := v.facilitator.Settle(ctx, &FacilitatorPaymentRequest{
+		X402Version:         versionOf(payload),
+		PaymentPayload:      payload,
+		PaymentRequirements: requirements,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("facilitator settlement failed: %w", err)
 	}
-
-	if !settleResp.Success {
-		return nil, fmt.Errorf("settlement failed: %s", settleResp.ErrorReason)
+	status := "success"
+	if !resp.Success {
+		status = "failed"
+		if resp.ErrorReason == "settlement_pending" {
+			status = "pending"
+		}
 	}
-
+	amount := resp.Amount
+	if amount == "" && requirements != nil {
+		amount = requirements.Amount
+	}
+	network := resp.Network
+	if network == "" && requirements != nil {
+		network = requirements.Network
+	}
 	return &x402.SettlementResult{
-		TransactionHash:  settleResp.Transaction,
-		Status:           "success",
-		SettledAt:        time.Now(),
-		Amount:           evmPayload.Authorization.Value,
-		PayerAddress:     evmPayload.Authorization.From,
-		RecipientAddress: evmPayload.Authorization.To,
-		Network:          settleResp.Network,
+		Success:            resp.Success,
+		ErrorReason:        resp.ErrorReason,
+		TransactionHash:    resp.Transaction,
+		Status:             status,
+		SettledAt:          time.Now(),
+		Amount:             amount,
+		PayerAddress:       resp.Payer,
+		Network:            network,
+		Extensions:         resp.Extensions,
+		ExtensionResponses: resp.ExtensionResponses,
 	}, nil
 }
 
-// SupportedKinds returns the supported scheme+network pairs.
+// SupportedKinds returns the kinds cached from the facilitator.
 func (v *EVMVerifier) SupportedKinds() []x402.SupportedKind {
-	return v.kinds
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := make([]x402.SupportedKind, len(v.kinds))
+	copy(out, v.kinds)
+	return out
 }
 
-func parseEVMPayload(payload interface{}) (*EVMPayload, error) {
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+func (v *EVMVerifier) refreshLoop() {
+	defer close(v.done)
+	ticker := time.NewTicker(supportedRefresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-v.stop:
+			return
+		case <-ticker.C:
+			v.refresh()
+		}
 	}
+}
 
-	var evmPayload EVMPayload
-	if err := json.Unmarshal(payloadBytes, &evmPayload); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal EVM payload: %w", err)
+func (v *EVMVerifier) refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	supported, err := v.facilitator.GetSupported(ctx)
+	if err != nil || supported == nil {
+		return
 	}
+	v.mu.Lock()
+	v.kinds = append([]x402.SupportedKind(nil), supported.Kinds...)
+	v.mu.Unlock()
+}
 
-	if evmPayload.Signature == "" {
-		return nil, fmt.Errorf("signature is required")
+func versionOf(payload *x402.PaymentPayload) int {
+	if payload != nil && payload.X402Version > 0 {
+		return payload.X402Version
 	}
-
-	if evmPayload.Authorization == nil {
-		return nil, fmt.Errorf("authorization is required")
-	}
-
-	auth := evmPayload.Authorization
-	if auth.From == "" || auth.To == "" || auth.Value == "" || auth.Nonce == "" {
-		return nil, fmt.Errorf("authorization missing required fields")
-	}
-
-	return &evmPayload, nil
+	return 2
 }

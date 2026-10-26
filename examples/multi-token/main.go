@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 
-	x402 "github.com/becomeliminal/grpc-gateway-x402"
-	"github.com/becomeliminal/grpc-gateway-x402/evm"
+	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	"github.com/becomeliminal/grpc-gateway-x402/v2/evm"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,7 +23,7 @@ const (
 func main() {
 	facilitatorURL := os.Getenv("FACILITATOR_URL")
 	if facilitatorURL == "" {
-		facilitatorURL = "https://facilitator.x402.org"
+		facilitatorURL = evm.DefaultFacilitatorURL
 	}
 
 	recipientAddress := os.Getenv("RECIPIENT_ADDRESS")
@@ -42,64 +42,79 @@ func main() {
 		EndpointPricing: map[string]x402.PricingRule{
 			// Premium tier - $1.00
 			"/v1/premium/*": {
-				Amount:      "1.00",
 				Description: "Premium content access",
 				AcceptedTokens: []x402.TokenRequirement{
 					{
-						Network:       "base-mainnet",
-						AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC on Base
+						Network:       "eip155:8453",
+						AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "1000000",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 					{
-						Network:       "ethereum-mainnet",
-						AssetContract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC on Ethereum
+						Network:       "eip155:1",
+						AssetContract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "1000000",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 					{
-						Network:       "ethereum-mainnet",
-						AssetContract: "0x6B175474E89094C44Da98b954EedeAC495271d0F", // DAI on Ethereum
+						Network:       "eip155:1",
+						AssetContract: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
 						Symbol:        "DAI",
 						Recipient:     recipientAddress,
+						Amount:        "1000000000000000000",
+						EIP712Name:    "Dai Stablecoin",
+						EIP712Version: "1",
 						TokenDecimals: 18,
 					},
 				},
 			},
 			// Basic tier - $0.10
 			"/v1/basic/*": {
-				Amount:      "0.10",
 				Description: "Basic content access",
 				AcceptedTokens: []x402.TokenRequirement{
 					{
-						Network:       "base-mainnet",
+						Network:       "eip155:8453",
 						AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "100000",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 					{
-						Network:       "polygon-mainnet",
-						AssetContract: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // USDC on Polygon
+						Network:       "eip155:137",
+						AssetContract: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "100000",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 				},
 			},
 			// Micro tier - $0.01
 			"/v1/micro/*": {
-				Amount:      "0.01",
 				Description: "Micro-transaction content",
 				MimeType:    "application/json",
 				AcceptedTokens: []x402.TokenRequirement{
 					{
-						Network:       "base-mainnet",
+						Network:       "eip155:8453",
 						AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "10000",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 				},

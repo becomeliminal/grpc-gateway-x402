@@ -203,7 +203,7 @@ func TestPricingRuleValidation(t *testing.T) {
 			name: "valid rule",
 			rule: PricingRule{
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
 				},
 			},
 			wantErr: false,
@@ -260,6 +260,34 @@ func TestPricingRuleValidation(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "missing eip712 version",
+			rule: PricingRule{
+				AcceptedTokens: []TokenRequirement{
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "permit2 does not require eip712",
+			rule: PricingRule{
+				AcceptedTokens: []TokenRequirement{
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", AssetTransferMethod: "permit2"},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "unknown payment flow",
+			rule: PricingRule{
+				PaymentFlow: "later",
+				AcceptedTokens: []TokenRequirement{
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -285,7 +313,7 @@ func TestConfigValidation(t *testing.T) {
 				EndpointPricing: map[string]PricingRule{
 					"/v1/paid": {
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
 						},
 					},
 				},

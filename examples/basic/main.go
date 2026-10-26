@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 
-	x402 "github.com/becomeliminal/grpc-gateway-x402"
-	"github.com/becomeliminal/grpc-gateway-x402/evm"
+	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	"github.com/becomeliminal/grpc-gateway-x402/v2/evm"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,7 +27,7 @@ func main() {
 	// Get configuration from environment
 	facilitatorURL := os.Getenv("FACILITATOR_URL")
 	if facilitatorURL == "" {
-		facilitatorURL = "https://facilitator.x402.org"
+		facilitatorURL = evm.DefaultFacilitatorURL
 	}
 
 	recipientAddress := os.Getenv("RECIPIENT_ADDRESS")
@@ -46,15 +46,17 @@ func main() {
 		Verifier: verifier,
 		EndpointPricing: map[string]x402.PricingRule{
 			"/v1/hello": {
-				Amount:      "0.01", // 1 cent
 				Description: "Get a personalized greeting",
 				AcceptedTokens: []x402.TokenRequirement{
 					{
-						Network:       "base-sepolia",
-						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base Sepolia
+						Network:       "eip155:84532", // Base Sepolia
+						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
+						Amount:        "10000", // 0.01 USDC
 						TokenName:     "USD Coin",
+						EIP712Name:    "USD Coin",
+						EIP712Version: "2",
 						TokenDecimals: 6,
 					},
 				},
