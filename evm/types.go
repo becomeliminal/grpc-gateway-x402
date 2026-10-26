@@ -1,66 +1,59 @@
 package evm
 
-// EVMPayload represents the payload in X-PAYMENT header for EVM chains
-// Following the EIP-3009 transferWithAuthorization specification
+// EVMPayload is the EIP-3009 payload shape.
+// The exact scheme parses it to bind the authorization, then forwards only
+// these fields. Other schemes are forwarded as opaque JSON, so string
+// timestamps and Permit2 bodies are not rejected in this process.
 type EVMPayload struct {
 	Signature     string         `json:"signature"`
 	Authorization *Authorization `json:"authorization"`
 }
 
-// Authorization contains the EIP-3009 authorization parameters
+// Authorization contains EIP-3009 authorization parameters.
+// ValidAfter and ValidBefore are JSON values because the spec encodes them
+// as strings. A local integer type would reject a compliant payload.
 type Authorization struct {
-	From        string `json:"from"`        // Payer's address
-	To          string `json:"to"`          // Recipient address
-	Value       string `json:"value"`       // Amount in token units
-	ValidAfter  int64  `json:"validAfter"`  // Unix timestamp
-	ValidBefore int64  `json:"validBefore"` // Unix timestamp
-	Nonce       string `json:"nonce"`       // Unique nonce to prevent replay
+	From        string      `json:"from"`
+	To          string      `json:"to"`
+	Value       string      `json:"value"`
+	ValidAfter  interface{} `json:"validAfter"`
+	ValidBefore interface{} `json:"validBefore"`
+	Nonce       string      `json:"nonce"`
 }
 
-// FacilitatorVerifyRequest is the request to the facilitator's /verify endpoint
-type FacilitatorVerifyRequest struct {
-	X402Version int         `json:"x402Version"`
-	Scheme      string      `json:"scheme"`
-	Network     string      `json:"network"`
-	Payload     interface{} `json:"payload"`
+// FacilitatorPaymentRequest is the body of POST /verify and POST /settle.
+type FacilitatorPaymentRequest struct {
+	X402Version         int         `json:"x402Version"`
+	PaymentPayload      interface{} `json:"paymentPayload"`
+	PaymentRequirements interface{} `json:"paymentRequirements"`
 }
 
-// FacilitatorVerifyResponse is the response from /verify
+// FacilitatorVerifyRequest is the body of POST /verify.
+type FacilitatorVerifyRequest = FacilitatorPaymentRequest
+
+// FacilitatorSettleRequest is the body of POST /settle.
+type FacilitatorSettleRequest = FacilitatorPaymentRequest
+
+// FacilitatorVerifyResponse is the decoded /verify response.
+// ExtensionResponses is the EXTENSION-RESPONSES side channel, not part of the JSON body.
 type FacilitatorVerifyResponse struct {
-	Valid  bool   `json:"valid"`
-	Reason string `json:"reason,omitempty"`
+	IsValid            bool                   `json:"isValid"`
+	InvalidReason      string                 `json:"invalidReason,omitempty"`
+	Payer              string                 `json:"payer,omitempty"`
+	Extensions         map[string]interface{} `json:"extensions,omitempty"`
+	ExtensionResponses map[string]interface{} `json:"-"`
 }
 
-// FacilitatorSettleRequest is the request to the facilitator's /settle endpoint
-type FacilitatorSettleRequest struct {
-	X402Version int         `json:"x402Version"`
-	Scheme      string      `json:"scheme"`
-	Network     string      `json:"network"`
-	Payload     interface{} `json:"payload"`
-}
-
-// FacilitatorSettleResponse is the response from /settle
+// FacilitatorSettleResponse is the decoded /settle response.
+// Success false is a settlement result. It includes settlement_pending,
+// which keeps Transaction.
 type FacilitatorSettleResponse struct {
-	TransactionHash string `json:"transactionHash"`
-	Status          string `json:"status"`
-}
-
-// FacilitatorSupportedResponse is the response from /supported
-type FacilitatorSupportedResponse struct {
-	Schemes  []SchemeInfo  `json:"schemes"`
-	Networks []NetworkInfo `json:"networks"`
-}
-
-// SchemeInfo describes a supported payment scheme
-type SchemeInfo struct {
-	Scheme      string `json:"scheme"`
-	Description string `json:"description,omitempty"`
-}
-
-// NetworkInfo describes a supported network
-type NetworkInfo struct {
-	Network        string `json:"network"`
-	ChainID        string `json:"chainId"`
-	ChainType      string `json:"chainType"`
-	NativeCurrency string `json:"nativeCurrency,omitempty"`
+	Success            bool                   `json:"success"`
+	ErrorReason        string                 `json:"errorReason,omitempty"`
+	Payer              string                 `json:"payer,omitempty"`
+	Transaction        string                 `json:"transaction"`
+	Network            string                 `json:"network"`
+	Amount             string                 `json:"amount,omitempty"`
+	Extensions         map[string]interface{} `json:"extensions,omitempty"`
+	ExtensionResponses map[string]interface{} `json:"-"`
 }

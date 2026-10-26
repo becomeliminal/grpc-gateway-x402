@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 
-	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
-	"github.com/becomeliminal/grpc-gateway-x402/v2/evm"
+	x402 "github.com/becomeliminal/grpc-gateway-x402"
+	"github.com/becomeliminal/grpc-gateway-x402/evm"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

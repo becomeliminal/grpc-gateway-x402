@@ -22,7 +22,7 @@ Payment middleware for gRPC services that implements the [x402 protocol](https:/
 ### Installation
 
 ```bash
-go get github.com/becomeliminal/grpc-gateway-x402/v2
+go get github.com/becomeliminal/grpc-gateway-x402
 ```
 
 ### Basic Usage
@@ -33,8 +33,8 @@ package main
 import (
     "net/http"
 
-    x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
-    "github.com/becomeliminal/grpc-gateway-x402/v2/evm"
+    x402 "github.com/becomeliminal/grpc-gateway-x402"
+    "github.com/becomeliminal/grpc-gateway-x402/evm"
     "github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 )
 
@@ -96,7 +96,6 @@ func (s *server) GetPremiumContent(ctx context.Context, req *pb.Request) (*pb.Re
 
 | V1 | V2 |
 |---|---|
-| `go get github.com/becomeliminal/grpc-gateway-x402` | `go get github.com/becomeliminal/grpc-gateway-x402/v2` |
 | Header: `X-PAYMENT` | Header: `PAYMENT-SIGNATURE` |
 | Header: `X-PAYMENT-RESPONSE` | Header: `PAYMENT-RESPONSE` |
 | 402 body only | 402 body + `PAYMENT-REQUIRED` header |
@@ -444,7 +443,7 @@ For native gRPC-to-gRPC communication, use the interceptors instead of HTTP midd
 ### Server Setup
 
 ```go
-import x402grpc "github.com/becomeliminal/grpc-gateway-x402/v2/grpc"
+import x402grpc "github.com/becomeliminal/grpc-gateway-x402/grpc"
 
 srv := grpc.NewServer(
     grpc.UnaryInterceptor(x402grpc.UnaryServerInterceptor(x402Config)),
@@ -531,10 +530,8 @@ See [`examples/`](./examples) for more:
 ## Testing
 
 ```bash
-cd v2 && go test ./...
+go test ./...
 ```
-
-The root module is the frozen v1 API. `go test ./...` from the repository root does not enter `v2/`.
 
 ## License
 

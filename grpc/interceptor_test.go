@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	x402 "github.com/becomeliminal/grpc-gateway-x402"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

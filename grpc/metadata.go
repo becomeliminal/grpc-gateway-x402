@@ -6,38 +6,41 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/becomeliminal/grpc-gateway-x402"
+	x402 "github.com/becomeliminal/grpc-gateway-x402"
 	"google.golang.org/grpc/metadata"
 )
 
+// V2 metadata keys. The bytes are the same base64 JSON an HTTP client sends.
 const (
-	// MetadataKeyPaymentRequirements is the metadata key for payment requirements
-	MetadataKeyPaymentRequirements = "x402-payment-requirements"
+	MetadataKeyPaymentSignature = "payment-signature"
+	MetadataKeyPaymentResponse  = "payment-response"
+	MetadataKeyPaymentRequired  = "payment-required"
 
-	// MetadataKeyPayment is the metadata key for payment payload
-	MetadataKeyPayment = "x402-payment"
-
-	// MetadataKeyPaymentResponse is the metadata key for settlement response
-	MetadataKeyPaymentResponse = "x402-payment-response"
+	// V1 legacy metadata keys.
+	MetadataKeyLegacyPayment             = "x402-payment"
+	MetadataKeyLegacyPaymentRequirements = "x402-payment-requirements"
+	MetadataKeyLegacyPaymentResponse     = "x402-payment-response"
 )
 
-// EncodePaymentRequirements encodes a PaymentRequirementsResponse to base64 JSON
-// for inclusion in gRPC metadata
-func EncodePaymentRequirements(requirements []x402.PaymentRequirements) (string, error) {
-	response := x402.PaymentRequiredResponse{
-		Error:               "payment required",
-		PaymentRequirements: requirements,
-	}
+// EncodePaymentRequirements encodes a challenge that carries accepts only.
+func EncodePaymentRequirements(accepts []x402.PaymentRequirements) (string, error) {
+	return EncodePaymentRequired(&x402.PaymentRequiredResponse{
+		X402Version: 2,
+		Error:       "payment required",
+		Accepts:     accepts,
+	})
+}
 
-	jsonBytes, err := json.Marshal(response)
+// EncodePaymentRequired encodes a full PaymentRequired object.
+func EncodePaymentRequired(resp *x402.PaymentRequiredResponse) (string, error) {
+	jsonBytes, err := json.Marshal(resp)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payment requirements: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePaymentRequirements decodes base64 JSON payment requirements from gRPC metadata
+// DecodePaymentRequirements decodes a base64 PaymentRequired object.
 func DecodePaymentRequirements(encoded string) (*x402.PaymentRequiredResponse, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -52,59 +55,79 @@ func DecodePaymentRequirements(encoded string) (*x402.PaymentRequiredResponse, e
 	return &response, nil
 }
 
-// EncodePayment encodes a Payment to base64 JSON for inclusion in gRPC metadata
-func EncodePayment(payment *x402.Payment) (string, error) {
-	jsonBytes, err := json.Marshal(payment)
+// EncodePaymentPayload encodes a PaymentPayload for metadata.
+func EncodePaymentPayload(payload *x402.PaymentPayload) (string, error) {
+	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal payment: %w", err)
+		return "", fmt.Errorf("failed to marshal payment payload: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePayment decodes base64 JSON payment from gRPC metadata
-func DecodePayment(encoded string) (*x402.Payment, error) {
+// DecodePaymentPayload decodes a v2 payment payload from metadata.
+func DecodePaymentPayload(encoded string) (*x402.PaymentPayload, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	var payment x402.Payment
-	if err := json.Unmarshal(jsonBytes, &payment); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal payment: %w", err)
+	var payload x402.PaymentPayload
+	if err := json.Unmarshal(jsonBytes, &payload); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal payment payload: %w", err)
 	}
 
-	// Basic validation
-	if payment.X402Version == 0 {
-		return nil, fmt.Errorf("x402Version is required")
-	}
-
-	if payment.Scheme == "" {
-		return nil, fmt.Errorf("scheme is required")
-	}
-
-	if payment.Network == "" {
-		return nil, fmt.Errorf("network is required")
-	}
-
-	if payment.Payload == nil {
+	if payload.Payload == nil {
 		return nil, fmt.Errorf("payload is required")
 	}
 
-	return &payment, nil
+	return &payload, nil
 }
 
-// EncodePaymentResponse encodes a PaymentResponse to base64 JSON
+// DecodeLegacyPayment decodes a V1 x402-payment metadata value.
+func DecodeLegacyPayment(encoded string) (*x402.PaymentPayload, error) {
+	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64: %w", err)
+	}
+
+	var legacy x402.LegacyPayment
+	if err := json.Unmarshal(jsonBytes, &legacy); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal legacy payment: %w", err)
+	}
+
+	if legacy.X402Version == 0 {
+		return nil, fmt.Errorf("x402Version is required")
+	}
+	if legacy.Scheme == "" {
+		return nil, fmt.Errorf("scheme is required")
+	}
+	if legacy.Network == "" {
+		return nil, fmt.Errorf("network is required")
+	}
+	if legacy.Payload == nil {
+		return nil, fmt.Errorf("payload is required")
+	}
+
+	return &x402.PaymentPayload{
+		X402Version: legacy.X402Version,
+		Accepted: x402.PaymentRequirements{
+			Scheme:  legacy.Scheme,
+			Network: legacy.Network,
+		},
+		Payload: legacy.Payload,
+	}, nil
+}
+
+// EncodePaymentResponse encodes a settlement receipt.
 func EncodePaymentResponse(response *x402.PaymentResponse) (string, error) {
 	jsonBytes, err := json.Marshal(response)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payment response: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePaymentResponse decodes base64 JSON payment response from gRPC metadata
+// DecodePaymentResponse decodes a settlement receipt.
 func DecodePaymentResponse(encoded string) (*x402.PaymentResponse, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -119,52 +142,53 @@ func DecodePaymentResponse(encoded string) (*x402.PaymentResponse, error) {
 	return &response, nil
 }
 
-// ExtractPaymentFromMetadata extracts and decodes payment from gRPC metadata
-func ExtractPaymentFromMetadata(md metadata.MD) (*x402.Payment, error) {
-	values := md.Get(MetadataKeyPayment)
-	if len(values) == 0 {
-		return nil, fmt.Errorf("no payment found in metadata")
+// ExtractPaymentFromMetadata reads a v2 payload, then a v1 payload.
+func ExtractPaymentFromMetadata(md metadata.MD) (*x402.PaymentPayload, bool, error) {
+	if values := md.Get(MetadataKeyPaymentSignature); len(values) > 0 {
+		payload, err := DecodePaymentPayload(values[0])
+		return payload, true, err
 	}
 
-	return DecodePayment(values[0])
+	if values := md.Get(MetadataKeyLegacyPayment); len(values) > 0 {
+		payload, err := DecodeLegacyPayment(values[0])
+		return payload, false, err
+	}
+
+	return nil, false, fmt.Errorf("no payment found in metadata")
 }
 
-// ExtractPaymentRequirementsFromMetadata extracts and decodes payment requirements from gRPC metadata
-func ExtractPaymentRequirementsFromMetadata(md metadata.MD) (*x402.PaymentRequiredResponse, error) {
-	values := md.Get(MetadataKeyPaymentRequirements)
-	if len(values) == 0 {
-		return nil, fmt.Errorf("no payment requirements found in metadata")
-	}
-
-	return DecodePaymentRequirements(values[0])
+// BuildPaymentRequirements builds the accepts list for a rule.
+// validityDuration is a time.Duration or a number of seconds.
+// fullMethod is accepted for callers that already pass the gRPC method.
+func BuildPaymentRequirements(rule *x402.PricingRule, fullMethod string, validityDuration interface{}) []x402.PaymentRequirements {
+	_ = fullMethod
+	return x402.BuildAccepts(rule, durationFrom(validityDuration))
 }
 
-// BuildPaymentRequirements builds payment requirements from a pricing rule
-func BuildPaymentRequirements(rule *x402.PricingRule, fullMethod string, validityDuration time.Duration) []x402.PaymentRequirements {
-	requirements := make([]x402.PaymentRequirements, 0, len(rule.AcceptedTokens))
-	validBefore := time.Now().Add(validityDuration).Unix()
-
-	for _, token := range rule.AcceptedTokens {
-		req := x402.PaymentRequirements{
-			X402Version:       1,
-			Scheme:            "exact", // EVM scheme
-			Network:           token.Network,
-			MaxAmountRequired: rule.Amount,
-			Resource:          fullMethod,
-			Description:       rule.Description,
-			MimeType:          rule.MimeType,
-			Recipient:         token.Recipient,
-			ValidBefore:       validBefore,
-			AssetContract:     token.AssetContract,
-			Metadata: x402.Metadata{
-				TokenSymbol:   token.Symbol,
-				TokenName:     token.TokenName,
-				TokenDecimals: token.TokenDecimals,
-			},
-			OutputSchema: rule.OutputSchema,
-		}
-		requirements = append(requirements, req)
+func durationFrom(v interface{}) time.Duration {
+	switch n := v.(type) {
+	case time.Duration:
+		return n
+	case int:
+		return time.Duration(n) * time.Second
+	case int32:
+		return time.Duration(n) * time.Second
+	case int64:
+		return time.Duration(n) * time.Second
+	default:
+		return 0
 	}
+}
 
-	return requirements
+func rawPayment(md metadata.MD) (header string, legacy bool) {
+	if md == nil {
+		return "", false
+	}
+	if values := md.Get(MetadataKeyPaymentSignature); len(values) > 0 && values[0] != "" {
+		return values[0], false
+	}
+	if values := md.Get(MetadataKeyLegacyPayment); len(values) > 0 && values[0] != "" {
+		return values[0], true
+	}
+	return "", false
 }
