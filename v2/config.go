@@ -120,27 +120,21 @@ type TokenRequirement struct {
 	// Amount is the price in atomic units.
 	Amount string
 
-	// TokenName is a human-readable name. It is the EIP-712 domain name
-	// when EIP712Name is empty.
+	// TokenName is the EIP-712 domain name, exactly as the token's name() returns it.
+	// The exact scheme sends it as extra.name. Base mainnet USDC returns "USD Coin".
+	// Base Sepolia USDC returns "USDC". Symbol is not written here.
 	TokenName string
+
+	// TokenVersion is the EIP-712 domain version, exactly as the token's version() returns it.
+	// The exact scheme sends it as extra.version. It is required for exact EIP-3009
+	// and is never defaulted.
+	TokenVersion string
 
 	// TokenDecimals is the number of decimals for this token.
 	TokenDecimals int
 
 	// Scheme defaults to exact.
 	Scheme string
-
-	// EIP712Name is the EIP-712 domain name. For Base USDC this is "USD Coin",
-	// not the symbol "USDC".
-	EIP712Name string
-
-	// EIP712Version is the EIP-712 domain version. For Base USDC this is "2".
-	// It is required for exact EIP-3009 and is never defaulted.
-	EIP712Version string
-
-	// TokenVersion is the EIP-712 domain version used when EIP712Version is
-	// empty. Callers that set the v2.3.0 field keep sending extra.version.
-	TokenVersion string
 
 	// AssetTransferMethod is omitted from extra when empty or eip3009.
 	// Other methods (permit2, erc7710) are written to extra.
@@ -153,23 +147,6 @@ func (t TokenRequirement) SchemeName() string {
 		return "exact"
 	}
 	return t.Scheme
-}
-
-// DomainName returns the EIP-712 domain name.
-func (t TokenRequirement) DomainName() string {
-	if t.EIP712Name != "" {
-		return t.EIP712Name
-	}
-	return t.TokenName
-}
-
-// DomainVersion returns the EIP-712 domain version.
-// EIP712Version wins when both fields are set.
-func (t TokenRequirement) DomainVersion() string {
-	if t.EIP712Version != "" {
-		return t.EIP712Version
-	}
-	return t.TokenVersion
 }
 
 // Flow returns the route payment flow. The empty value means authorization.
@@ -260,19 +237,19 @@ func (t *TokenRequirement) Validate() error {
 		return fmt.Errorf("amount is required")
 	}
 
-	if t.requiresEIP712() {
-		if t.DomainName() == "" {
-			return fmt.Errorf("eip712 domain name is required for exact eip3009 (set EIP712Name or TokenName)")
+	if t.requiresDomain() {
+		if t.TokenName == "" {
+			return fmt.Errorf("token name is required")
 		}
-		if t.DomainVersion() == "" {
-			return fmt.Errorf("eip712 version is required for exact eip3009 (set EIP712Version or TokenVersion)")
+		if t.TokenVersion == "" {
+			return fmt.Errorf("token version is required")
 		}
 	}
 
 	return nil
 }
 
-func (t TokenRequirement) requiresEIP712() bool {
+func (t TokenRequirement) requiresDomain() bool {
 	if t.SchemeName() != "exact" {
 		return false
 	}

@@ -48,8 +48,8 @@ func testConfig() Config {
 						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Recipient:     "0xRecipient",
 						Amount:        "1000000",
-						EIP712Name:    "USD Coin",
-						EIP712Version: "2",
+						TokenName:     "USD Coin",
+						TokenVersion:  "2",
 					},
 				},
 			},
@@ -256,7 +256,7 @@ func TestPaymentMiddleware_V2Header_ValidPayment(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -374,7 +374,7 @@ func TestPaymentMiddleware_V1Header_Fallback(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -462,7 +462,7 @@ func TestPaymentMiddleware_VerificationFailed(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipient", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -488,7 +488,7 @@ func TestPaymentMiddleware_SkipPaths(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/*": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},
@@ -517,7 +517,7 @@ func TestPaymentMiddleware_CustomPaywallHTML(t *testing.T) {
 		EndpointPricing: map[string]PricingRule{
 			"/v1/paid": {
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 		},

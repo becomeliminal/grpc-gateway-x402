@@ -60,8 +60,8 @@ func paidRule() x402.PricingRule {
 				AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 				Recipient:     "0xRecipient",
 				Amount:        "1000000",
-				EIP712Name:    "USD Coin",
-				EIP712Version: "2",
+				TokenName:     "USD Coin",
+				TokenVersion:  "2",
 			},
 		},
 	}

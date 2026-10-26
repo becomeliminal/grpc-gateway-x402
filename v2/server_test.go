@@ -59,8 +59,8 @@ func pricedConfig(v ChainVerifier, flow string) Config {
 						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Recipient:     "0xRecipient",
 						Amount:        "1000000",
-						EIP712Name:    "USD Coin",
-						EIP712Version: "2",
+						TokenName:     "USD Coin",
+						TokenVersion:  "2",
 					},
 				},
 			},
@@ -528,8 +528,8 @@ func TestV1HeaderWithSeveralTokensPaysTheFirst(t *testing.T) {
 	}
 	rule := PricingRule{
 		AcceptedTokens: []TokenRequirement{
-			{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x1", Recipient: "0xRecipientA", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
-			{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x2", Recipient: "0xRecipientB", Amount: "2000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+			{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x1", Recipient: "0xRecipientA", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
+			{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x2", Recipient: "0xRecipientB", Amount: "2000000", TokenName: "USD Coin", TokenVersion: "2"},
 		},
 	}
 	cfg := pricedConfig(v, "")

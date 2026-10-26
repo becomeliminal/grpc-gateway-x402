@@ -36,11 +36,11 @@ func BuildAccepts(rule *PricingRule, validity time.Duration) []PaymentRequiremen
 
 func tokenExtra(token TokenRequirement, flow string) map[string]interface{} {
 	extra := make(map[string]interface{})
-	if name := token.DomainName(); name != "" {
-		extra["name"] = name
+	if token.TokenName != "" {
+		extra["name"] = token.TokenName
 	}
-	if version := token.DomainVersion(); version != "" {
-		extra["version"] = version
+	if token.TokenVersion != "" {
+		extra["version"] = token.TokenVersion
 	}
 	method := token.AssetTransferMethod
 	if method != "" && !strings.EqualFold(method, "eip3009") {

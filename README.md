@@ -55,8 +55,8 @@ func main() {
                         Symbol:        "USDC",
                         Recipient:     "0xYourAddress",
                         Amount:        "1000000", // 1 USDC (6 decimals)
-                        EIP712Name:    "USD Coin",
-                        EIP712Version: "2",
+                        TokenName:    "USD Coin",
+                        TokenVersion: "2",
                     },
                 },
             },
@@ -133,8 +133,8 @@ x402Config := x402.Config{
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
                     Amount:        "100000", // 0.10 USDC
-                    EIP712Name:    "USD Coin",
-                    EIP712Version: "2",
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
                 {
                     Network:       "eip155:42161", // Arbitrum
@@ -142,8 +142,8 @@ x402Config := x402.Config{
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
                     Amount:        "100000",
-                    EIP712Name:    "USD Coin",
-                    EIP712Version: "2",
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
                 {
                     Network:       "eip155:137", // Polygon
@@ -151,8 +151,8 @@ x402Config := x402.Config{
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
                     Amount:        "100000",
-                    EIP712Name:    "USD Coin",
-                    EIP712Version: "2",
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
             },
         },
@@ -171,7 +171,7 @@ EndpointPricing: map[string]x402.PricingRule{
 }
 ```
 
-Each token carries its own atomic amount. `exact` EIP-3009 also requires `EIP712Name` and `EIP712Version` (`USD Coin` / `2` for USDC). The symbol is not the EIP-712 domain name.
+Each token carries its own atomic amount. `exact` EIP-3009 also requires `TokenName` and `TokenVersion`, the values `name()` and `version()` return. Base mainnet USDC is `USD Coin` / `2`. Base Sepolia USDC is `USDC` / `2`. The symbol is not written as `extra.name`.
 
 ### Skip Free Endpoints
 
@@ -296,8 +296,8 @@ type TokenRequirement struct {
     Symbol          string // logs and handlers only, never extra.name
     Recipient       string
     Amount          string // atomic units
-    EIP712Name      string // "USD Coin" for USDC
-    EIP712Version   string // "2" for USDC, required, never defaulted
+    TokenName       string // EIP-712 name(); "USD Coin" on Base, "USDC" on Base Sepolia
+    TokenVersion    string // EIP-712 version(); required for exact EIP-3009, never defaulted
     AssetTransferMethod string // omitted from extra when empty or "eip3009"
 }
 ```

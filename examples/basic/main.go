@@ -54,9 +54,8 @@ func main() {
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
 						Amount:        "10000", // 0.01 USDC
-						TokenName:     "USD Coin",
-						EIP712Name:    "USD Coin",
-						EIP712Version: "2",
+						TokenName:     "USDC",
+						TokenVersion:  "2",
 						TokenDecimals: 6,
 					},
 				},

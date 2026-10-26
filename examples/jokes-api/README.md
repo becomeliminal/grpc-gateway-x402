@@ -50,7 +50,7 @@ Response:
     "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     "payTo": "0xYourAddress",
     "maxTimeoutSeconds": 300,
-    "extra": {"name": "USD Coin", "version": "2"}
+    "extra": {"name": "USDC", "version": "2"}
   }]
 }
 ```

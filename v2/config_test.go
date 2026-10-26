@@ -203,7 +203,7 @@ func TestPricingRuleValidation(t *testing.T) {
 			name: "valid rule",
 			rule: PricingRule{
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 			wantErr: false,
@@ -261,19 +261,10 @@ func TestPricingRuleValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "token version supplies the eip712 version",
+			name: "missing token version",
 			rule: PricingRule{
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing eip712 version",
-			rule: PricingRule{
-				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin"},
 				},
 			},
 			wantErr: true,
@@ -292,7 +283,7 @@ func TestPricingRuleValidation(t *testing.T) {
 			rule: PricingRule{
 				PaymentFlow: "later",
 				AcceptedTokens: []TokenRequirement{
-					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+					{Network: "eip155:8453", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 				},
 			},
 			wantErr: true,
@@ -322,7 +313,7 @@ func TestConfigValidation(t *testing.T) {
 				EndpointPricing: map[string]PricingRule{
 					"/v1/paid": {
 						AcceptedTokens: []TokenRequirement{
-							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", EIP712Name: "USD Coin", EIP712Version: "2"},
+							{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x123", Recipient: "0xabc", Amount: "1000000", TokenName: "USD Coin", TokenVersion: "2"},
 						},
 					},
 				},
