@@ -10,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	x402 "github.com/becomeliminal/grpc-gateway-x402"
-	"github.com/becomeliminal/grpc-gateway-x402/evm"
+	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	"github.com/becomeliminal/grpc-gateway-x402/v2/evm"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -39,7 +39,7 @@ var jokes = []string{
 func main() {
 	facilitatorURL := os.Getenv("FACILITATOR_URL")
 	if facilitatorURL == "" {
-		facilitatorURL = "https://facilitator.x402.org"
+		facilitatorURL = evm.DefaultFacilitatorURL
 	}
 
 	recipientAddress := os.Getenv("RECIPIENT_ADDRESS")
@@ -57,16 +57,17 @@ func main() {
 		Verifier: verifier,
 		EndpointPricing: map[string]x402.PricingRule{
 			"/v1/joke": {
-				Amount:      "0.0001", // One hundredth of a cent!
 				Description: "Get a programming joke",
 				MimeType:    "application/json",
 				AcceptedTokens: []x402.TokenRequirement{
 					{
-						Network:       "base-sepolia",
-						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // USDC on Base Sepolia
+						Network:       "eip155:84532", // Base Sepolia
+						AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
 						Symbol:        "USDC",
 						Recipient:     recipientAddress,
-						TokenName:     "USD Coin",
+						Amount:        "100", // 0.0001 USDC
+						TokenName:     "USDC",
+						TokenVersion:  "2",
 						TokenDecimals: 6,
 					},
 				},

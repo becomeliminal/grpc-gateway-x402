@@ -1,9 +1,11 @@
 package x402
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,212 +24,407 @@ const (
 	HeaderLegacyPaymentResponse = "X-PAYMENT-RESPONSE"
 )
 
-// PaymentMiddleware creates HTTP middleware that enforces x402 payment requirements.
-// It detects V2 headers (PAYMENT-SIGNATURE) first and falls back to V1 (X-PAYMENT).
+var errHandlerStatus = errors.New("x402: handler wrote a non-success status")
+
+// PaymentMiddleware enforces x402 payment requirements on an HTTP handler.
+// PAYMENT-SIGNATURE is the v2 header. X-PAYMENT is accepted as a v1 fallback.
+// The default flow verifies, runs the handler, settles, then releases a 2xx body.
 func PaymentMiddleware(cfg Config) func(http.Handler) http.Handler {
-	if err := cfg.Validate(); err != nil {
+	srv, err := NewServer(cfg)
+	if err != nil {
 		panic(fmt.Sprintf("invalid x402 middleware configuration: %v", err))
 	}
-
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
-
-			rule, requiresPayment := cfg.MatchEndpoint(r.URL.Path)
-			if !requiresPayment {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Detect protocol version from headers.
-			// V2: PAYMENT-SIGNATURE, V1 fallback: X-PAYMENT
-			paymentHeader := r.Header.Get(HeaderPaymentSignature)
-			isV2 := true
-			if paymentHeader == "" {
-				paymentHeader = r.Header.Get(HeaderLegacyPayment)
-				isV2 = false
-			}
-
-			if paymentHeader == "" {
-				sendPaymentRequired(w, r, rule, &cfg)
-				return
-			}
-
-			// A V1 payment names no token, so it pays the rule's first accepted
-			// token. A V2 payment names its token and is matched below.
-			requirements := buildRequirementsFromRule(rule)
-
-			// Parse payment header.
-			var payload *PaymentPayload
-			var err error
-			if isV2 {
-				payload, err = parsePaymentPayload(paymentHeader)
-			} else {
-				payload, err = parseLegacyPayment(paymentHeader, requirements)
-			}
-			if err != nil {
-				sendError(w, http.StatusBadRequest, fmt.Sprintf("Invalid payment header: %v", err))
-				return
-			}
-
-			// For V2, the client's chosen token must be one the rule accepts; the
-			// payment is then held to the rule's requirements for that token,
-			// never to the client's claims.
-			var tokenSymbol string
-			if isV2 {
-				matched, symbol := MatchClientToken(rule, payload)
-				if matched == nil {
-					sendPaymentRequired(w, r, rule, &cfg)
-					return
-				}
-				requirements = matched
-				tokenSymbol = symbol
-			}
-
-			// Verify the payment.
-			verifyResult, err := cfg.Verifier.Verify(ctx, payload, requirements)
-			if err != nil {
-				sendError(w, http.StatusInternalServerError, fmt.Sprintf("Payment verification error: %v", err))
-				return
-			}
-
-			if !verifyResult.Valid {
-				sendPaymentRequired(w, r, rule, &cfg)
-				return
-			}
-
-			// Settle the payment on-chain.
-			settlementResult, err := cfg.Verifier.Settle(ctx, payload, requirements)
-			if err != nil {
-				sendError(w, http.StatusInternalServerError, fmt.Sprintf("Payment settlement error: %v", err))
-				return
-			}
-
-			// Resolve token symbol from rule match or verifier.
-			if tokenSymbol == "" {
-				tokenSymbol = verifyResult.TokenSymbol
-			}
-
-			// Create payment context for downstream handlers.
-			paymentCtx := &PaymentContext{
-				Verified:        true,
-				PayerAddress:    verifyResult.PayerAddress,
-				Amount:          verifyResult.Amount,
-				TokenSymbol:     tokenSymbol,
-				Network:         requirements.Network,
-				TransactionHash: settlementResult.TransactionHash,
-				SettledAt:       settlementResult.SettledAt,
-			}
-
-			ctx = context.WithValue(ctx, PaymentContextKey, paymentCtx)
-
-			// Set response headers (version-aware).
-			paymentResponse := PaymentResponse{
-				Success:     true,
-				Transaction: settlementResult.TransactionHash,
-				Network:     settlementResult.Network,
-				Payer:       settlementResult.PayerAddress,
-			}
-			if responseJSON, err := json.Marshal(paymentResponse); err == nil {
-				encoded := base64.StdEncoding.EncodeToString(responseJSON)
-				if isV2 {
-					w.Header().Set(HeaderPaymentResponse, encoded)
-				} else {
-					w.Header().Set(HeaderLegacyPaymentResponse, encoded)
-				}
-			}
-
-			next.ServeHTTP(w, r.WithContext(ctx))
+			srv.serveHTTP(next, w, r)
 		})
 	}
 }
 
-// buildRequirementsFromRule constructs PaymentRequirements from the first accepted token.
-// Used for V1 legacy payments, which name no token. V2 payments use MatchClientToken.
-func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
-	if len(rule.AcceptedTokens) == 0 {
-		return nil
-	}
-	token := rule.AcceptedTokens[0]
-	return &PaymentRequirements{
-		Scheme:  "exact",
-		Network: token.Network,
-		Amount:  token.Amount,
-		Asset:   token.AssetContract,
-		PayTo:   token.Recipient,
-	}
-}
-
-// MatchClientToken finds the accepted token matching the client's chosen asset+network.
-// Returns the requirements for that token and its symbol, or nil if no match.
-func MatchClientToken(rule *PricingRule, payload *PaymentPayload) (*PaymentRequirements, string) {
-	clientAsset := strings.ToLower(payload.Accepted.Asset)
-	clientNetwork := payload.Accepted.Network
-
-	for _, token := range rule.AcceptedTokens {
-		if strings.ToLower(token.AssetContract) == clientAsset && token.Network == clientNetwork {
-			return &PaymentRequirements{
-				Scheme:  "exact",
-				Network: token.Network,
-				Amount:  token.Amount,
-				Asset:   token.AssetContract,
-				PayTo:   token.Recipient,
-			}, token.Symbol
-		}
-	}
-	return nil, ""
-}
-
-// sendPaymentRequired sends a 402 Payment Required response with V2 format.
-func sendPaymentRequired(w http.ResponseWriter, r *http.Request, rule *PricingRule, cfg *Config) {
-	if cfg.CustomPaywallHTML != "" && isBrowserRequest(r) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusPaymentRequired)
-		w.Write([]byte(cfg.CustomPaywallHTML))
+func (s *Server) serveHTTP(next http.Handler, w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		applyCORS(w.Header(), r)
+		next.ServeHTTP(w, r)
 		return
 	}
 
-	accepts := make([]PaymentRequirements, 0, len(rule.AcceptedTokens))
-	for _, token := range rule.AcceptedTokens {
-		accepts = append(accepts, PaymentRequirements{
-			Scheme:            "exact",
-			Network:           token.Network,
-			Amount:            token.Amount,
-			Asset:             token.AssetContract,
-			PayTo:             token.Recipient,
-			MaxTimeoutSeconds: int(cfg.ValidityDuration.Seconds()),
-			Extra: map[string]interface{}{
-				"name":    token.TokenName,
-				"version": token.TokenVersion,
-			},
-		})
+	if _, priced := s.match(Call{RouteKey: r.URL.Path}); !priced {
+		applyCORS(w.Header(), r)
+		next.ServeHTTP(w, r)
+		return
 	}
 
-	response := PaymentRequiredResponse{
-		X402Version: 2,
-		Error:       "Payment required",
-		Accepts:     accepts,
+	header := r.Header.Get(HeaderPaymentSignature)
+	legacy := false
+	if header == "" {
+		header = r.Header.Get(HeaderLegacyPayment)
+		legacy = header != ""
 	}
 
-	// Set PAYMENT-REQUIRED header with base64-encoded requirements.
-	if responseJSON, err := json.Marshal(response); err == nil {
-		w.Header().Set(HeaderPaymentRequired, base64.StdEncoding.EncodeToString(responseJSON))
+	var deadline time.Duration
+	if until, ok := r.Context().Deadline(); ok {
+		deadline = time.Until(until)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusPaymentRequired)
-	json.NewEncoder(w).Encode(response)
-}
+	bw := newBufferWriter(s.cfg.MaxBufferBytes)
+	call := Call{
+		RouteKey:      r.URL.Path,
+		ResourceURL:   requestResourceURL(r),
+		Deadline:      deadline,
+		PaymentHeader: header,
+		Legacy:        legacy,
+		Method:        r.Method,
+	}
 
-func sendError(w http.ResponseWriter, statusCode int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(map[string]string{
-		"error": message,
+	result := s.Execute(r.Context(), call, func(ctx context.Context) (HandlerOutput, error) {
+		next.ServeHTTP(bw, r.WithContext(ctx))
+		if bw.overflow {
+			return HandlerOutput{}, ErrBufferOverflow
+		}
+		status := bw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		out := HandlerOutput{
+			Body:   bw.body(),
+			Status: status,
+			Header: bw.headerCopy(),
+		}
+		if status < 200 || status >= 300 {
+			return out, errHandlerStatus
+		}
+		return out, nil
 	})
+
+	s.writeHTTP(w, r, bw, result)
 }
 
-// parsePaymentPayload decodes a V2 PAYMENT-SIGNATURE header into a PaymentPayload.
+func (s *Server) writeHTTP(w http.ResponseWriter, r *http.Request, bw *bufferWriter, result Result) {
+	switch result.Outcome {
+	case OutcomeFree:
+		applyCORS(w.Header(), r)
+		copyHeaders(w.Header(), bw.header)
+		status := bw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(bw.body())
+	case OutcomePaymentRequired:
+		s.writeChallenge(w, r, result)
+	case OutcomeInvalid:
+		applyCORS(w.Header(), r)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPaymentMessage(result.Reason)})
+	case OutcomeConflict:
+		applyCORS(w.Header(), r)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "payment_identifier_conflict"})
+	case OutcomeInternal:
+		applyCORS(w.Header(), r)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "facilitator request failed"})
+	case OutcomeBufferOverflow:
+		applyCORS(w.Header(), r)
+		if result.Receipt != nil {
+			s.setPaymentHeader(w.Header(), result)
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "response exceeds MaxBufferBytes; set PaymentFlow to upfront",
+		})
+	case OutcomeHandlerFailed:
+		// Authorization did not settle. Upfront and escrow already did, and the
+		// receipt is attached so the client can see that it was charged.
+		flushBuffered(w, r, bw, result, false)
+	case OutcomeSettled:
+		flushBuffered(w, r, bw, result, true)
+	case OutcomeReplay:
+		writeReplay(w, r, result)
+	case OutcomeSettleFailed:
+		s.writeSettlementFailure(w, r, result)
+	default:
+		applyCORS(w.Header(), r)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "payment processing failed"})
+	}
+}
+
+func (s *Server) writeChallenge(w http.ResponseWriter, r *http.Request, result Result) {
+	h := w.Header()
+	applyCORS(h, r)
+	h.Set("Cache-Control", "no-store")
+	if result.Challenge != nil {
+		if encoded, err := encodeJSON(result.Challenge); err == nil {
+			h.Set(HeaderPaymentRequired, encoded)
+		}
+	}
+	if s.cfg.CustomPaywallHTML != "" && isBrowserRequest(r) {
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(s.cfg.CustomPaywallHTML))
+		return
+	}
+	h.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusPaymentRequired)
+	if result.Challenge != nil {
+		_ = json.NewEncoder(w).Encode(result.Challenge)
+	}
+}
+
+func (s *Server) writeSettlementFailure(w http.ResponseWriter, r *http.Request, result Result) {
+	h := w.Header()
+	applyCORS(h, r)
+	h.Set("Cache-Control", "no-store")
+	s.setPaymentHeader(h, result)
+	h.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusPaymentRequired)
+	_, _ = w.Write([]byte("{}\n"))
+}
+
+func flushBuffered(w http.ResponseWriter, r *http.Request, bw *bufferWriter, result Result, paid bool) {
+	h := w.Header()
+	copyHeaders(h, bw.header)
+	applyCORS(h, r)
+	if result.Receipt != nil {
+		setReceiptHeader(h, result)
+	}
+	if paid {
+		appendCachePrivate(h)
+	}
+	status := bw.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(bw.body())
+}
+
+func writeReplay(w http.ResponseWriter, r *http.Request, result Result) {
+	h := w.Header()
+	copyHeaders(h, result.Output.Header)
+	applyCORS(h, r)
+	setReceiptHeader(h, result)
+	appendCachePrivate(h)
+	status := result.Output.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(result.Output.Body)
+}
+
+func (s *Server) setPaymentHeader(h http.Header, result Result) {
+	setReceiptHeader(h, result)
+}
+
+func setReceiptHeader(h http.Header, result Result) {
+	if result.Receipt == nil {
+		return
+	}
+	encoded, err := encodeJSON(result.Receipt)
+	if err != nil {
+		return
+	}
+	if result.Legacy {
+		h.Set(HeaderLegacyPaymentResponse, encoded)
+		return
+	}
+	h.Set(HeaderPaymentResponse, encoded)
+}
+
+func invalidPaymentMessage(reason string) string {
+	switch reason {
+	case "payment_identifier_required", "invalid_payment_identifier":
+		return reason
+	default:
+		return "invalid payment header"
+	}
+}
+
+func encodeJSON(v interface{}) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func requestResourceURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := forwardedProto(r); proto != "" {
+		scheme = proto
+	}
+	host := r.Host
+	if host == "" {
+		host = "example.com"
+	}
+	return scheme + "://" + host + r.URL.RequestURI()
+}
+
+func forwardedProto(r *http.Request) string {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(proto, ",")[0])
+}
+
+func applyCORS(h http.Header, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		if h.Get("Access-Control-Allow-Origin") == "" {
+			h.Set("Access-Control-Allow-Origin", "*")
+		}
+	} else {
+		h.Set("Access-Control-Allow-Origin", origin)
+		appendVary(h, "Origin")
+	}
+	h.Set("Access-Control-Expose-Headers", mergeList(h.Get("Access-Control-Expose-Headers"),
+		HeaderPaymentRequired, HeaderPaymentResponse, HeaderLegacyPaymentResponse))
+	h.Set("Access-Control-Allow-Headers", mergeList(h.Get("Access-Control-Allow-Headers"),
+		HeaderPaymentSignature, "Content-Type", HeaderLegacyPayment))
+	if h.Get("Access-Control-Allow-Methods") == "" {
+		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	}
+	if h.Get("Access-Control-Max-Age") == "" {
+		h.Set("Access-Control-Max-Age", "600")
+	}
+}
+
+func mergeList(existing string, add ...string) string {
+	seen := make(map[string]struct{})
+	var out []string
+	appendPart := func(part string) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return
+		}
+		key := strings.ToLower(part)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, part)
+	}
+	for _, part := range strings.Split(existing, ",") {
+		appendPart(part)
+	}
+	for _, part := range add {
+		appendPart(part)
+	}
+	return strings.Join(out, ", ")
+}
+
+func appendVary(h http.Header, value string) {
+	existing := h.Get("Vary")
+	if existing == "" {
+		h.Set("Vary", value)
+		return
+	}
+	for _, part := range strings.Split(existing, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), value) {
+			return
+		}
+	}
+	h.Set("Vary", existing+", "+value)
+}
+
+func appendCachePrivate(h http.Header) {
+	cc := h.Get("Cache-Control")
+	if cc == "" {
+		h.Set("Cache-Control", "private")
+		return
+	}
+	for _, part := range strings.Split(cc, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), "private") {
+			return
+		}
+	}
+	h.Set("Cache-Control", cc+", private")
+}
+
+func copyHeaders(dst http.Header, src map[string][]string) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, body interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+type bufferWriter struct {
+	header   http.Header
+	buf      bytes.Buffer
+	status   int
+	max      int
+	overflow bool
+	wrote    bool
+}
+
+func newBufferWriter(max int) *bufferWriter {
+	return &bufferWriter{header: make(http.Header), max: max}
+}
+
+func (b *bufferWriter) Header() http.Header { return b.header }
+
+func (b *bufferWriter) WriteHeader(status int) {
+	if b.wrote {
+		return
+	}
+	b.wrote = true
+	b.status = status
+}
+
+func (b *bufferWriter) Write(p []byte) (int, error) {
+	if !b.wrote {
+		b.WriteHeader(http.StatusOK)
+	}
+	if b.overflow {
+		return 0, ErrBufferOverflow
+	}
+	if b.max > 0 && b.buf.Len()+len(p) > b.max {
+		b.overflow = true
+		b.buf.Reset()
+		return 0, ErrBufferOverflow
+	}
+	return b.buf.Write(p)
+}
+
+func (b *bufferWriter) body() []byte {
+	return b.buf.Bytes()
+}
+
+func (b *bufferWriter) headerCopy() map[string][]string {
+	if len(b.header) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(b.header))
+	for key, values := range b.header {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+// buildRequirementsFromRule returns requirements for the first accepted token.
+// V1 payments use it when the route advertises one option.
+func buildRequirementsFromRule(rule *PricingRule) *PaymentRequirements {
+	accepts := BuildAccepts(rule, 0)
+	if len(accepts) == 0 {
+		return nil
+	}
+	return &accepts[0]
+}
+
+// buildAcceptsFromRule constructs every PaymentRequirements value for a rule.
+func buildAcceptsFromRule(rule *PricingRule, validityDuration time.Duration) []PaymentRequirements {
+	return BuildAccepts(rule, validityDuration)
+}
+
+// parsePaymentPayload decodes a V2 PAYMENT-SIGNATURE header.
 func parsePaymentPayload(header string) (*PaymentPayload, error) {
 	payloadBytes, err := base64.StdEncoding.DecodeString(header)
 	if err != nil {
@@ -250,7 +447,9 @@ func parsePaymentPayload(header string) (*PaymentPayload, error) {
 	return &payload, nil
 }
 
-// parseLegacyPayment decodes a V1 X-PAYMENT header and converts to V2 PaymentPayload.
+// parseLegacyPayment decodes a V1 X-PAYMENT header into a V2 PaymentPayload.
+// Network is left as the client sent it. Amount, asset, and payTo are filled
+// from the single advertised option.
 func parseLegacyPayment(header string, requirements *PaymentRequirements) (*PaymentPayload, error) {
 	payloadBytes, err := base64.StdEncoding.DecodeString(header)
 	if err != nil {
@@ -275,7 +474,6 @@ func parseLegacyPayment(header string, requirements *PaymentRequirements) (*Paym
 		return nil, fmt.Errorf("payload is required")
 	}
 
-	// Convert V1 to V2 payload format.
 	accepted := PaymentRequirements{
 		Scheme:  legacy.Scheme,
 		Network: legacy.Network,
@@ -284,6 +482,8 @@ func parseLegacyPayment(header string, requirements *PaymentRequirements) (*Paym
 		accepted.Amount = requirements.Amount
 		accepted.Asset = requirements.Asset
 		accepted.PayTo = requirements.PayTo
+		accepted.MaxTimeoutSeconds = requirements.MaxTimeoutSeconds
+		accepted.Extra = requirements.Extra
 	}
 
 	return &PaymentPayload{
@@ -299,7 +499,7 @@ func GetPaymentFromContext(ctx context.Context) (*PaymentContext, bool) {
 	return payment, ok
 }
 
-// RequirePayment extracts payment from context and returns error if not found.
+// RequirePayment extracts payment from context and returns an error if it is missing.
 func RequirePayment(ctx context.Context) (*PaymentContext, error) {
 	payment, ok := GetPaymentFromContext(ctx)
 	if !ok {
@@ -311,13 +511,9 @@ func RequirePayment(ctx context.Context) (*PaymentContext, error) {
 	return payment, nil
 }
 
-// EncodePaymentPayload encodes a PaymentPayload to base64 JSON for the PAYMENT-SIGNATURE header.
+// EncodePaymentPayload encodes a PaymentPayload to base64 JSON for PAYMENT-SIGNATURE.
 func EncodePaymentPayload(payload *PaymentPayload) (string, error) {
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal payment payload: %w", err)
-	}
-	return base64.StdEncoding.EncodeToString(payloadJSON), nil
+	return encodeJSON(payload)
 }
 
 // DecodePaymentResponse decodes a PAYMENT-RESPONSE header.
@@ -341,7 +537,6 @@ func ReadPaymentRequirements(resp *http.Response) (*PaymentRequiredResponse, err
 		return nil, fmt.Errorf("expected status 402, got %d", resp.StatusCode)
 	}
 
-	// Try PAYMENT-REQUIRED header first (V2).
 	if header := resp.Header.Get(HeaderPaymentRequired); header != "" {
 		decoded, err := base64.StdEncoding.DecodeString(header)
 		if err == nil {
@@ -352,7 +547,6 @@ func ReadPaymentRequirements(resp *http.Response) (*PaymentRequiredResponse, err
 		}
 	}
 
-	// Fall back to body.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
@@ -380,20 +574,4 @@ func isBrowserRequest(r *http.Request) bool {
 	}
 
 	return false
-}
-
-// buildAcceptsFromRule constructs all PaymentRequirements from a pricing rule.
-func buildAcceptsFromRule(rule *PricingRule, validityDuration time.Duration) []PaymentRequirements {
-	accepts := make([]PaymentRequirements, 0, len(rule.AcceptedTokens))
-	for _, token := range rule.AcceptedTokens {
-		accepts = append(accepts, PaymentRequirements{
-			Scheme:            "exact",
-			Network:           token.Network,
-			Amount:            token.Amount,
-			Asset:             token.AssetContract,
-			PayTo:             token.Recipient,
-			MaxTimeoutSeconds: int(validityDuration.Seconds()),
-		})
-	}
-	return accepts
 }

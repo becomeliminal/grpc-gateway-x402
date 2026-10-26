@@ -22,13 +22,13 @@ func (e *PaymentError) Unwrap() error {
 
 // Error codes.
 const (
-	ErrCodeInvalidPayment     = "INVALID_PAYMENT"
-	ErrCodeVerificationFailed = "VERIFICATION_FAILED"
-	ErrCodeSettlementFailed   = "SETTLEMENT_FAILED"
-	ErrCodeInvalidConfig      = "INVALID_CONFIG"
+	ErrCodeInvalidPayment      = "INVALID_PAYMENT"
+	ErrCodeVerificationFailed  = "VERIFICATION_FAILED"
+	ErrCodeSettlementFailed    = "SETTLEMENT_FAILED"
+	ErrCodeInvalidConfig       = "INVALID_CONFIG"
 	ErrCodeNetworkNotSupported = "NETWORK_NOT_SUPPORTED"
-	ErrCodeInsufficientAmount = "INSUFFICIENT_AMOUNT"
-	ErrCodeExpiredPayment     = "EXPIRED_PAYMENT"
+	ErrCodeInsufficientAmount  = "INSUFFICIENT_AMOUNT"
+	ErrCodeExpiredPayment      = "EXPIRED_PAYMENT"
 )
 
 // NewPaymentError creates a new PaymentError.

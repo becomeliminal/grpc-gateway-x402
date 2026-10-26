@@ -2,130 +2,87 @@
 
 ## Summary
 
-The gRPC transport implements x402 payment flows over native gRPC protocol using metadata for payment signaling and gRPC status codes for error handling. This enables payment-gated gRPC services for service-to-service communication, native mobile clients, and high-performance scenarios requiring binary protobuf encoding.
+The gRPC transport carries the same three x402 v2 JSON objects as the HTTP
+transport. The bytes in metadata are the base64 strings an HTTP client already
+knows. Native RPCs use this transport directly. A grpc-gateway deployment uses
+the HTTP transport on the public port and this transport only for internal RPCs
+that are paid on their own.
 
-This transport is distinct from the HTTP transport used with grpc-gateway reverse proxies.
+## Metadata
 
-## Payment Required Signaling
+| Role | Key | When |
+| --- | --- | --- |
+| Challenge | `payment-required` | Trailing metadata on `RESOURCE_EXHAUSTED` |
+| Payment | `payment-signature` | Incoming metadata |
+| Receipt | `payment-response` | Trailing metadata on success and on settlement failure |
 
-The server indicates payment is required using the gRPC `RESOURCE_EXHAUSTED` status code with payment requirements in the error message.
+V1 keys remain accepted: `x402-payment`, `x402-payment-response`, and
+`x402-payment-requirements`.
 
-**Mechanism**: gRPC status code `RESOURCE_EXHAUSTED` (8) with base64-encoded JSON in error message
-**Data Format**: Base64-encoded `PaymentRequirementsResponse` schema in status message
+The status message is a short reason (`payment_required`, or the facilitator's
+`invalidReason`). The object itself is in the metadata, not in the message
+string.
 
-**Note on Status Code**: This spec uses `RESOURCE_EXHAUSTED` (8) to signal payment required, following the precedent set by Google Cloud Platform for billing and quota enforcement. Semantically, this represents "you have exhausted your quota of free access" and signals to clients that additional resources (payment) are needed to continue.
+A challenge also attaches `google.rpc.ErrorInfo` with reason `PAYMENT_REQUIRED`
+and domain `x402.org`.
 
-**Example:**
+## Objects
 
-```
-Status: RESOURCE_EXHAUSTED (8)
-Message: eyJ4NDAyVmVyc2lvbiI6MSwi...
+`payment-required` is a base64 `PaymentRequired` object: `x402Version`, `error`,
+`resource` (with an absolute `url`), and `accepts`. `resource.url` for a native
+method is `grpc://localhost` plus the full method name, unless the route sets
+its own URL. `accepts[].network` is CAIP-2. `accepts[].amount` is a decimal
+string of atomic units. `maxTimeoutSeconds` is present on every accept and is
+the minimum of the route validity and the time left on the RPC deadline.
 
-(Base64 decodes to:)
-{
-  "x402Version": 1,
-  "error": "Payment required to access this resource",
-  "paymentRequirements": [
-    {
-      "x402Version": 1,
-      "scheme": "exact",
-      "network": "base-mainnet",
-      "maxAmountRequired": "100000",
-      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      "payTo": "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
-      "resource": "/compute.v1.ComputeService/RunTask",
-      "description": "Execute computational task",
-      "mimeType": "application/grpc",
-      "outputSchema": null,
-      "maxTimeoutSeconds": 300,
-      "extra": {
-        "name": "USDC",
-        "version": "2"
-      }
-    }
-  ]
-}
-```
+`payment-signature` is a base64 `PaymentPayload`. `accepted` must equal one
+advertised option: scheme, network, amount, asset, payTo, maxTimeoutSeconds,
+and the server's `extra` as a subset. The scheme payload is opaque to the
+resource server.
 
-## Payment Payload Transmission
+`payment-response` is a base64 settlement receipt. `transaction` and `network`
+are always present. `transaction` may be empty. `success: false` is how a
+settlement failure, including `settlement_pending`, is reported. A pending
+settlement keeps the transaction hash.
 
-Clients send payment data using gRPC initial metadata with key `x402-payment`.
+## Status mapping
 
-**Mechanism**: `x402-payment` metadata field containing base64-encoded JSON
-**Data Format**: Base64-encoded `PaymentPayload` schema in initial metadata
+| Condition | Code | Metadata |
+| --- | --- | --- |
+| No payment, verification failed, or settlement failed | `RESOURCE_EXHAUSTED` | `payment-required`, or `payment-response` when a receipt exists |
+| Malformed payload | `INVALID_ARGUMENT` | none |
+| Facilitator transport failure | `INTERNAL` | none |
+| Handler success after settlement | `OK` | `payment-response` |
 
-**Example:**
+## Payment flow
 
-```
-Metadata:
-  x402-payment: eyJ4NDAyVmVyc2lvbiI6MSwic2NoZW1lIjoiZXhhY3QiLC...
+The default flow is `authorization`:
 
-(Base64 decodes to:)
-{
-  "x402Version": 1,
-  "scheme": "exact",
-  "network": "base-mainnet",
-  "payload": {
-    "signature": "0x2d6a7588d6acca505cbf0d9a4a227e0c52c6c34008c8e8986a1283259764173608a2ce6496642e377d6da8dbbf5836e9bd15092f9ecab05ded3d6293af148b571c",
-    "authorization": {
-      "from": "0x857b06519E91e3A54538791bDbb0E22373e36b66",
-      "to": "0x209693Bc6afc0C5328bA36FaF03C514EF312287C",
-      "value": "100000",
-      "validAfter": "1740672089",
-      "validBefore": "1740672154",
-      "nonce": "0xf3746613c2d920b5fdabc0856f2aeb2d4f88ee6037b8cc5d04a71a4462f13480"
-    }
-  }
-}
-```
+1. Verify the payload with the facilitator.
+2. Run the handler. The handler sees the verified payer. The transaction hash
+   is empty, because funds have not moved.
+3. Settle only if the handler returns nil.
+4. Return the handler result with `payment-response`.
 
-For streaming RPCs, payment is verified before the stream begins using the same metadata mechanism.
+`upfront` settles before the handler. The handler sees the transaction hash.
+A failed handler still carries `payment-response`, because the client was
+charged. `escrow` settles once before the handler and once after a successful
+handler.
 
-## Settlement Response Delivery
+Unary calls withhold the handler result until settlement returns. That is the
+same guarantee as an HTTP server that buffers a 2xx body.
 
-Servers communicate payment settlement results using gRPC trailing metadata with key `x402-payment-response`.
+Streams verify before the first message and settle only if the handler returns
+nil. Bytes already sent cannot be recalled. A route that must not leak unpaid
+bytes sets `upfront`.
 
-**Mechanism**: `x402-payment-response` trailing metadata field containing base64-encoded JSON
-**Data Format**: Base64-encoded `SettlementResponse` schema in trailing metadata
+## Idempotency
 
-**Example (Successful Settlement):**
-
-```
-Status: OK (0)
-Trailing-Metadata:
-  x402-payment-response: eyJzdWNjZXNzIjp0cnVlLCJ0cmFuc2FjdGlvbiI6...
-
-(Base64 decodes to:)
-{
-  "transactionHash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-  "status": "confirmed"
-}
-```
-
-**Example (Payment Failure):**
-
-```
-Status: RESOURCE_EXHAUSTED (8)
-Message: eyJ4NDAyVmVyc2lvbiI6MSwi...
-
-(Payment requirements returned with failure reason)
-```
-
-## Error Handling
-
-gRPC transport maps x402 errors to gRPC status codes:
-
-| x402 Error       | gRPC Status Code     | Description                                     |
-| ---------------- | -------------------- | ----------------------------------------------- |
-| Payment Required | `RESOURCE_EXHAUSTED` | Payment needed to access resource               |
-| Invalid Payment  | `INVALID_ARGUMENT`   | Malformed payment payload or encoding           |
-| Payment Failed   | `RESOURCE_EXHAUSTED` | Payment verification or settlement failed       |
-| Server Error     | `INTERNAL`           | Internal server error during payment processing |
-| Success          | `OK`                 | Payment verified and settled successfully       |
+When `extensions["payment-identifier"]` carries an id, a settled success is
+remembered for the route validity window. A retry with the same id returns the
+stored receipt and does not call `/settle` again.
 
 ## References
 
-- [Core x402 Specification](../x402-specification.md)
-- [gRPC Status Codes](https://grpc.io/docs/guides/status-codes/)
-- [gRPC Metadata](https://grpc.io/docs/guides/metadata/)
-- [Go Reference Implementation](https://github.com/becomeliminal/grpc-gateway-x402/tree/main/grpc)
+- [Core x402 Specification](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md)
+- [HTTP transport](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md)

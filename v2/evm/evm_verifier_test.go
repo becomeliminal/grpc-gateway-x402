@@ -47,14 +47,12 @@ func newFakeFacilitator(t *testing.T) *fakeFacilitator {
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v2/x402/supported":
-			json.NewEncoder(w).Encode(FacilitatorSupportedResponse{
-				Kinds: []SupportedKind{{Scheme: "exact", Network: testNetwork}},
-			})
-		case "/v2/x402/verify":
+		case "/supported":
+			_, _ = w.Write([]byte(`{"kinds":[{"x402Version":2,"scheme":"exact","network":"` + testNetwork + `"}],"extensions":[],"signers":{}}`))
+		case "/verify":
 			f.verifies = append(f.verifies, record(t, r))
 			json.NewEncoder(w).Encode(FacilitatorVerifyResponse{IsValid: true, Payer: testPayer})
-		case "/v2/x402/settle":
+		case "/settle":
 			f.settles = append(f.settles, record(t, r))
 			json.NewEncoder(w).Encode(FacilitatorSettleResponse{
 				Success: true, Payer: testPayer, Transaction: "0xtx", Network: testNetwork,
@@ -74,6 +72,7 @@ func newTestVerifier(t *testing.T, f *fakeFacilitator) *EVMVerifier {
 	if err != nil {
 		t.Fatalf("creating verifier: %v", err)
 	}
+	t.Cleanup(v.Close)
 	return v
 }
 
@@ -258,7 +257,7 @@ func TestEVMVerifier_ForwardsOnlyTheSchemesPayloadFields(t *testing.T) {
 		if len(calls) != 1 {
 			t.Fatalf("facilitator %s calls = %d, want 1", name, len(calls))
 		}
-		forwarded := calls[0]["payload"].(map[string]interface{})["payload"]
+		forwarded := calls[0]["paymentPayload"].(map[string]interface{})["payload"]
 		if !reflect.DeepEqual(forwarded, wantPayload) {
 			t.Errorf("%s forwarded payload = %+v, want %+v", name, forwarded, wantPayload)
 		}

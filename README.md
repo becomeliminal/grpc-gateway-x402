@@ -40,20 +40,23 @@ import (
 
 func main() {
     // Create EVM verifier (supports all EVM chains + ERC-20 tokens)
-    verifier, _ := evm.NewEVMVerifier("https://facilitator.liminal.cash")
+    verifier, _ := evm.NewEVMVerifier("https://x402.org/facilitator")
 
     // Configure payment requirements
     x402Config := x402.Config{
         Verifier: verifier,
         EndpointPricing: map[string]x402.PricingRule{
             "/v1/premium/*": {
-                Amount: "1000000", // 1 USDC (6 decimals, atomic units)
+                Description: "Premium content",
                 AcceptedTokens: []x402.TokenRequirement{
                     {
                         Network:       "eip155:8453", // Base (CAIP-2)
                         AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                         Symbol:        "USDC",
                         Recipient:     "0xYourAddress",
+                        Amount:        "1000000", // 1 USDC (6 decimals)
+                        TokenName:    "USD Coin",
+                        TokenVersion: "2",
                     },
                 },
             },
@@ -80,6 +83,8 @@ func (s *server) GetPremiumContent(ctx context.Context, req *pb.Request) (*pb.Re
         return nil, status.Error(codes.Unauthenticated, "payment required")
     }
 
+    // TransactionHash is empty on the default authorization flow.
+    // Settlement runs after this handler returns.
     log.Printf("Payment: %s %s on %s (tx: %s)",
         payment.Amount, payment.TokenSymbol, payment.Network, payment.TransactionHash)
 
@@ -121,25 +126,33 @@ x402Config := x402.Config{
     Verifier: verifier,
     EndpointPricing: map[string]x402.PricingRule{
         "/v1/api/*": {
-            Amount: "100000", // 0.10 USDC
             AcceptedTokens: []x402.TokenRequirement{
                 {
-                    Network:       "eip155:8453",  // Base
+                    Network:       "eip155:8453", // Base
                     AssetContract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
+                    Amount:        "100000", // 0.10 USDC
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
                 {
                     Network:       "eip155:42161", // Arbitrum
                     AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
+                    Amount:        "100000",
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
                 {
-                    Network:       "eip155:137",   // Polygon
+                    Network:       "eip155:137", // Polygon
                     AssetContract: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
                     Symbol:        "USDC",
                     Recipient:     "0xYourAddress",
+                    Amount:        "100000",
+                    TokenName:    "USD Coin",
+                    TokenVersion: "2",
                 },
             },
         },
@@ -151,12 +164,14 @@ x402Config := x402.Config{
 
 ```go
 EndpointPricing: map[string]x402.PricingRule{
-    "/v1/premium/*":     {Amount: "1000000", ...},  // 1 USDC
-    "/v1/basic/*":       {Amount: "100000", ...},   // 0.10 USDC
-    "/v1/micro/*":       {Amount: "10000", ...},    // 0.01 USDC
-    "/v1/specific-path": {Amount: "500000", ...},   // 0.50 USDC
+    "/v1/premium/*":     {AcceptedTokens: []x402.TokenRequirement{{Amount: "1000000"}}}, // 1 USDC
+    "/v1/basic/*":       {AcceptedTokens: []x402.TokenRequirement{{Amount: "100000"}}},  // 0.10 USDC
+    "/v1/micro/*":       {AcceptedTokens: []x402.TokenRequirement{{Amount: "10000"}}},   // 0.01 USDC
+    "/v1/specific-path": {AcceptedTokens: []x402.TokenRequirement{{Amount: "500000"}}},  // 0.50 USDC
 }
 ```
+
+Each token carries its own atomic amount. `exact` EIP-3009 also requires `TokenName` and `TokenVersion`, the values `name()` and `version()` return. Base mainnet USDC is `USD Coin` / `2`. Base Sepolia USDC is `USDC` / `2`. The symbol is not written as `extra.name`.
 
 ### Skip Free Endpoints
 
@@ -175,8 +190,7 @@ Config{
 ```go
 Config{
     DefaultPricing: &x402.PricingRule{
-        Amount: "50000", // 0.05 USDC default for unmatched paths
-        AcceptedTokens: []x402.TokenRequirement{...},
+        AcceptedTokens: []x402.TokenRequirement{{Amount: "50000"}}, // 0.05 USDC for unmatched paths
     },
 }
 ```
@@ -197,13 +211,12 @@ Config{
 }
 ```
 
-Browsers get HTML, API clients get JSON.
+Browsers get an HTML body. The `PAYMENT-REQUIRED` header is still set.
 
 ### Output Schema
 
 ```go
 PricingRule{
-    Amount: "1000000",
     OutputSchema: map[string]interface{}{
         "type": "object",
         "properties": map[string]interface{}{
@@ -217,31 +230,31 @@ PricingRule{
 }
 ```
 
+`OutputSchema` is not written on the v2 challenge. A response schema belongs on the Bazaar extension.
+
 ## Protocol Flow
+
+The default flow is `authorization`: verify, run the handler, settle, then release the response. A failed handler is not settled. A settlement failure returns 402 with `PAYMENT-RESPONSE` and does not release the handler body.
 
 ```
 Client                    Gateway                    Facilitator              Blockchain
   |                          |                            |                        |
   |-- GET /v1/premium/data ->|                            |                        |
+  |<- 402 + PAYMENT-REQUIRED-|                            |                        |
   |                          |                            |                        |
-  |<- 402 Payment Required --|                            |                        |
-  |   Body: {accepts: [...]} |                            |                        |
-  |   PAYMENT-REQUIRED: ...  |                            |                        |
+  |-- GET + PAYMENT-SIGNATURE|                            |                        |
+  |                          |-- POST {base}/verify ----->|                        |
+  |                          |<- {isValid: true} ---------|                        |
   |                          |                            |                        |
-  |-- GET /v1/premium/data ->|                            |                        |
-  |   PAYMENT-SIGNATURE: ... |                            |                        |
-  |                          |-- POST /v2/x402/verify --->|                        |
-  |                          |<- {valid: true} -----------|                        |
+  |                          | run handler (no tx hash)   |                        |
   |                          |                            |                        |
-  |                          |-- POST /v2/x402/settle --->|                        |
+  |                          |-- POST {base}/settle ----->|                        |
   |                          |                            |-- transfer() --------->|
-  |                          |                            |<- tx hash -------------|
-  |                          |<- {txHash: "0x..."} -------|                        |
-  |                          |                            |                        |
-  |<- 200 OK ----------------|                            |                        |
-  |   PAYMENT-RESPONSE: ...  |                            |                        |
-  |   Premium Data           |                            |                        |
+  |                          |<- {transaction, payer} ----|                        |
+  |<- 200 + PAYMENT-RESPONSE-|                            |                        |
 ```
+
+`{base}` is the facilitator URL you pass in, for example `https://x402.org/facilitator`. Routes that need finality first set `PaymentFlow` to `upfront`. `escrow` settles once before the handler and once after.
 
 ## Types
 
@@ -249,14 +262,15 @@ Client                    Gateway                    Facilitator              Bl
 
 ```go
 type Config struct {
-    Verifier         ChainVerifier              // Payment verification backend
-    EndpointPricing  map[string]PricingRule      // URL patterns to pricing (HTTP)
-    MethodPricing    map[string]PricingRule      // gRPC method names to pricing
-    DefaultPricing   *PricingRule               // Fallback pricing (optional)
-    ValidityDuration time.Duration              // Payment validity (default: 5 min)
-    SkipPaths        []string                   // HTTP paths to skip
-    SkipMethods      []string                   // gRPC methods to skip
-    CustomPaywallHTML string                    // HTML for browser 402 responses
+    Verifier          ChainVerifier
+    EndpointPricing   map[string]PricingRule
+    MethodPricing     map[string]PricingRule
+    DefaultPricing    *PricingRule
+    ValidityDuration  time.Duration // default 5 minutes
+    MaxBufferBytes    int           // default 1 MiB, held until settle
+    SkipPaths         []string
+    SkipMethods       []string
+    CustomPaywallHTML string
 }
 ```
 
@@ -264,11 +278,12 @@ type Config struct {
 
 ```go
 type PricingRule struct {
-    Amount         string                 // Atomic units (e.g., "1000000" = 1 USDC)
-    AcceptedTokens []TokenRequirement     // Accepted payment options
-    Description    string                 // What this payment is for
-    MimeType       string                 // Resource MIME type (optional)
-    OutputSchema   map[string]interface{} // Response JSON schema (optional)
+    AcceptedTokens []TokenRequirement
+    Description    string
+    MimeType       string
+    PaymentFlow    string // "authorization" (default), "upfront", or "escrow"
+    ResourceURL    string // overrides resource.url
+    Extensions     map[string]interface{}
 }
 ```
 
@@ -276,12 +291,14 @@ type PricingRule struct {
 
 ```go
 type TokenRequirement struct {
-    Network       string // CAIP-2 (e.g., "eip155:8453")
-    AssetContract string // Token contract address
-    Symbol        string // Token symbol (e.g., "USDC")
-    Recipient     string // Payment recipient address
-    TokenName     string // Human-readable name (optional)
-    TokenDecimals int    // Token decimals (optional)
+    Network         string // CAIP-2, for example "eip155:8453"
+    AssetContract   string
+    Symbol          string // logs and handlers only, never extra.name
+    Recipient       string
+    Amount          string // atomic units
+    TokenName       string // EIP-712 name(); "USD Coin" on Base, "USDC" on Base Sepolia
+    TokenVersion    string // EIP-712 version(); required for exact EIP-3009, never defaulted
+    AssetTransferMethod string // omitted from extra when empty or "eip3009"
 }
 ```
 
@@ -296,12 +313,12 @@ type PaymentRequirements struct {
     Amount            string                 `json:"amount"`            // atomic units
     Asset             string                 `json:"asset"`             // token contract
     PayTo             string                 `json:"payTo"`             // recipient
-    MaxTimeoutSeconds int                    `json:"maxTimeoutSeconds,omitempty"`
-    Extra             map[string]interface{} `json:"extra,omitempty"`   // merchant metadata
+    MaxTimeoutSeconds int                    `json:"maxTimeoutSeconds"`
+    Extra             map[string]interface{} `json:"extra,omitempty"`
 }
 ```
 
-The `Extra` map allows merchant-defined metadata (e.g., `{"orderId": "...", "tier": "premium"}`).
+For EIP-3009, `extra.name` and `extra.version` are the token domain. `extra.assetTransferMethod` is omitted for `eip3009`. `extra.paymentFlow` is set when the route is not `authorization`.
 
 ### `PaymentPayload`
 
@@ -310,9 +327,10 @@ What the client sends in the `PAYMENT-SIGNATURE` header.
 ```go
 type PaymentPayload struct {
     X402Version int                    `json:"x402Version"`
-    Accepted    PaymentRequirements    `json:"accepted"`    // what client agreed to
-    Payload     interface{}            `json:"payload"`     // scheme-specific (e.g., EVMPayload)
-    Extensions  map[string]interface{} `json:"extensions,omitempty"` // protocol extensions
+    Resource    *ResourceInfo          `json:"resource,omitempty"`
+    Accepted    PaymentRequirements    `json:"accepted"`
+    Payload     interface{}            `json:"payload"`
+    Extensions  map[string]interface{} `json:"extensions,omitempty"`
 }
 ```
 
@@ -324,9 +342,11 @@ The 402 response body. The `Accepts` array lets merchants offer multiple payment
 
 ```go
 type PaymentRequiredResponse struct {
-    X402Version int                   `json:"x402Version"`
-    Error       string                `json:"error"`
-    Accepts     []PaymentRequirements `json:"accepts"`
+    X402Version int                    `json:"x402Version"`
+    Error       string                 `json:"error"`
+    Resource    *ResourceInfo          `json:"resource,omitempty"`
+    Accepts     []PaymentRequirements  `json:"accepts"`
+    Extensions  map[string]interface{} `json:"extensions,omitempty"`
 }
 ```
 
@@ -337,16 +357,17 @@ Settlement receipt sent in the `PAYMENT-RESPONSE` header.
 ```go
 type PaymentResponse struct {
     Success     bool   `json:"success"`
-    Transaction string `json:"transaction,omitempty"` // tx hash
-    Network     string `json:"network,omitempty"`     // CAIP-2
+    Transaction string `json:"transaction"` // always present, may be empty
+    Network     string `json:"network"`     // always present
     Payer       string `json:"payer,omitempty"`
     ErrorReason string `json:"errorReason,omitempty"`
+    Amount      string `json:"amount,omitempty"`
 }
 ```
 
 ### `PaymentContext`
 
-What handlers receive after payment is verified and settled.
+What handlers can read during the call. On `authorization`, `TransactionHash` is empty because settlement runs after the handler returns. It is set when the route already settled (`upfront` or `escrow`).
 
 ```go
 type PaymentContext struct {
@@ -366,8 +387,10 @@ Scheme + network pair returned by the facilitator.
 
 ```go
 type SupportedKind struct {
-    Scheme  string `json:"scheme"`  // e.g., "exact"
-    Network string `json:"network"` // CAIP-2
+    X402Version int                    `json:"x402Version,omitempty"`
+    Scheme      string                 `json:"scheme"`
+    Network     string                 `json:"network"`
+    Extra       map[string]interface{} `json:"extra,omitempty"`
 }
 ```
 
@@ -447,18 +470,17 @@ payment, err := x402grpc.RequirePayment(ctx)
 ## Custom Facilitators
 
 ```go
-// Liminal facilitator
-verifier, _ := evm.NewEVMVerifier("https://facilitator.liminal.cash")
+// Public facilitator. The base URL already includes its prefix.
+verifier, _ := evm.NewEVMVerifier("https://x402.org/facilitator")
 
-// Coinbase facilitator
-verifier, _ := evm.NewEVMVerifier("https://facilitator.x402.org")
+// Coinbase CDP. Same prefix rule.
+verifier, _ := evm.NewEVMVerifier("https://api.cdp.coinbase.com/platform/v2/x402")
 
 // Your own facilitator
 verifier, _ := evm.NewEVMVerifier("https://my-facilitator.com")
-
-// Local development
-verifier, _ := evm.NewEVMVerifier("http://localhost:3000")
 ```
+
+`NewEVMVerifier` calls `GET {base}/supported` at startup and refreshes that list in the background. A request calls `POST {base}/verify` and `POST {base}/settle` only. Attach CDP credentials with `SetAuthProvider` on the facilitator client. The scheme payload is forwarded unchanged, so Permit2 and later schemes work when the facilitator supports them.
 
 ### Custom Verification
 
@@ -474,7 +496,7 @@ func (v *CustomVerifier) Verify(ctx context.Context, payload *x402.PaymentPayloa
 
 func (v *CustomVerifier) Settle(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.SettlementResult, error) {
     // Your settlement logic
-    return &x402.SettlementResult{TransactionHash: "0x..."}, nil
+    return &x402.SettlementResult{Success: true, TransactionHash: "0x..."}, nil
 }
 
 func (v *CustomVerifier) SupportedKinds() []x402.SupportedKind {
@@ -491,7 +513,7 @@ The V2 middleware auto-detects V1 clients via header detection:
 - `X-PAYMENT` header → V1 path (responds with `X-PAYMENT-RESPONSE`)
 - `PAYMENT-SIGNATURE` header → V2 path (responds with `PAYMENT-RESPONSE`)
 
-Both work simultaneously. Existing V1 clients require no changes.
+Both work simultaneously. Existing V1 clients require no changes. A V1 payload does not name a token, so a route with several options charges the first one.
 
 ## Examples
 
@@ -509,9 +531,10 @@ See [`examples/`](./examples) for more:
 ## Testing
 
 ```bash
-go test ./...
-go test -cover ./...
+cd v2 && go test ./...
 ```
+
+The root module is the frozen v1 API. `go test ./...` from the repository root does not enter `v2/`.
 
 ## License
 

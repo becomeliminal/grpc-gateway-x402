@@ -8,8 +8,10 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// WithPaymentMetadata returns a ServeMuxOption that propagates payment information
-// from HTTP context to gRPC metadata, making it accessible in gRPC handlers.
+// WithPaymentMetadata copies the verified payment into gRPC metadata so handlers
+// written in any language can read it. On the authorization flow
+// x-payment-tx-hash is empty: settlement runs after the handler returns.
+// The hash is set only when the route already settled (upfront or escrow).
 func WithPaymentMetadata() runtime.ServeMuxOption {
 	return runtime.WithMetadata(func(ctx context.Context, r *http.Request) metadata.MD {
 		md := metadata.MD{}

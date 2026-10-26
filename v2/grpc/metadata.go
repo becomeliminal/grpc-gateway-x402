@@ -4,40 +4,43 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
 	"google.golang.org/grpc/metadata"
 )
 
-// V2 metadata keys.
+// V2 metadata keys. The bytes are the same base64 JSON an HTTP client sends.
 const (
-	MetadataKeyPaymentSignature    = "payment-signature"
-	MetadataKeyPaymentResponse     = "payment-response"
-	MetadataKeyPaymentRequired     = "payment-required"
+	MetadataKeyPaymentSignature = "payment-signature"
+	MetadataKeyPaymentResponse  = "payment-response"
+	MetadataKeyPaymentRequired  = "payment-required"
 
 	// V1 legacy metadata keys.
-	MetadataKeyLegacyPayment              = "x402-payment"
-	MetadataKeyLegacyPaymentRequirements  = "x402-payment-requirements"
-	MetadataKeyLegacyPaymentResponse      = "x402-payment-response"
+	MetadataKeyLegacyPayment             = "x402-payment"
+	MetadataKeyLegacyPaymentRequirements = "x402-payment-requirements"
+	MetadataKeyLegacyPaymentResponse     = "x402-payment-response"
 )
 
-// EncodePaymentRequirements encodes a PaymentRequiredResponse to base64 JSON.
+// EncodePaymentRequirements encodes a challenge that carries accepts only.
 func EncodePaymentRequirements(accepts []x402.PaymentRequirements) (string, error) {
-	response := x402.PaymentRequiredResponse{
+	return EncodePaymentRequired(&x402.PaymentRequiredResponse{
 		X402Version: 2,
 		Error:       "payment required",
 		Accepts:     accepts,
-	}
+	})
+}
 
-	jsonBytes, err := json.Marshal(response)
+// EncodePaymentRequired encodes a full PaymentRequired object.
+func EncodePaymentRequired(resp *x402.PaymentRequiredResponse) (string, error) {
+	jsonBytes, err := json.Marshal(resp)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payment requirements: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePaymentRequirements decodes base64 JSON payment requirements.
+// DecodePaymentRequirements decodes a base64 PaymentRequired object.
 func DecodePaymentRequirements(encoded string) (*x402.PaymentRequiredResponse, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -52,18 +55,16 @@ func DecodePaymentRequirements(encoded string) (*x402.PaymentRequiredResponse, e
 	return &response, nil
 }
 
-// EncodePaymentPayload encodes a PaymentPayload to base64 JSON for metadata.
+// EncodePaymentPayload encodes a PaymentPayload for metadata.
 func EncodePaymentPayload(payload *x402.PaymentPayload) (string, error) {
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payment payload: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePaymentPayload decodes base64 JSON payment payload from metadata.
-// Tries V2 key first, falls back to V1 legacy key.
+// DecodePaymentPayload decodes a v2 payment payload from metadata.
 func DecodePaymentPayload(encoded string) (*x402.PaymentPayload, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -82,7 +83,7 @@ func DecodePaymentPayload(encoded string) (*x402.PaymentPayload, error) {
 	return &payload, nil
 }
 
-// DecodeLegacyPayment decodes a V1 x402-payment metadata value into a PaymentPayload.
+// DecodeLegacyPayment decodes a V1 x402-payment metadata value.
 func DecodeLegacyPayment(encoded string) (*x402.PaymentPayload, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -117,17 +118,16 @@ func DecodeLegacyPayment(encoded string) (*x402.PaymentPayload, error) {
 	}, nil
 }
 
-// EncodePaymentResponse encodes a PaymentResponse to base64 JSON.
+// EncodePaymentResponse encodes a settlement receipt.
 func EncodePaymentResponse(response *x402.PaymentResponse) (string, error) {
 	jsonBytes, err := json.Marshal(response)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal payment response: %w", err)
 	}
-
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// DecodePaymentResponse decodes base64 JSON payment response.
+// DecodePaymentResponse decodes a settlement receipt.
 func DecodePaymentResponse(encoded string) (*x402.PaymentResponse, error) {
 	jsonBytes, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -142,16 +142,13 @@ func DecodePaymentResponse(encoded string) (*x402.PaymentResponse, error) {
 	return &response, nil
 }
 
-// ExtractPaymentFromMetadata extracts payment from gRPC metadata.
-// Tries V2 key (payment-signature) first, falls back to V1 (x402-payment).
+// ExtractPaymentFromMetadata reads a v2 payload, then a v1 payload.
 func ExtractPaymentFromMetadata(md metadata.MD) (*x402.PaymentPayload, bool, error) {
-	// Try V2 first.
 	if values := md.Get(MetadataKeyPaymentSignature); len(values) > 0 {
 		payload, err := DecodePaymentPayload(values[0])
 		return payload, true, err
 	}
 
-	// Fall back to V1.
 	if values := md.Get(MetadataKeyLegacyPayment); len(values) > 0 {
 		payload, err := DecodeLegacyPayment(values[0])
 		return payload, false, err
@@ -160,19 +157,38 @@ func ExtractPaymentFromMetadata(md metadata.MD) (*x402.PaymentPayload, bool, err
 	return nil, false, fmt.Errorf("no payment found in metadata")
 }
 
-// BuildPaymentRequirements builds PaymentRequirements from a pricing rule.
+// BuildPaymentRequirements builds the accepts list for a rule.
+// validityDuration is a time.Duration or a number of seconds.
+// fullMethod is accepted for callers that already pass the gRPC method.
 func BuildPaymentRequirements(rule *x402.PricingRule, fullMethod string, validityDuration interface{}) []x402.PaymentRequirements {
-	accepts := make([]x402.PaymentRequirements, 0, len(rule.AcceptedTokens))
+	_ = fullMethod
+	return x402.BuildAccepts(rule, durationFrom(validityDuration))
+}
 
-	for _, token := range rule.AcceptedTokens {
-		accepts = append(accepts, x402.PaymentRequirements{
-			Scheme:  "exact",
-			Network: token.Network,
-			Amount:  token.Amount,
-			Asset:   token.AssetContract,
-			PayTo:   token.Recipient,
-		})
+func durationFrom(v interface{}) time.Duration {
+	switch n := v.(type) {
+	case time.Duration:
+		return n
+	case int:
+		return time.Duration(n) * time.Second
+	case int32:
+		return time.Duration(n) * time.Second
+	case int64:
+		return time.Duration(n) * time.Second
+	default:
+		return 0
 	}
+}
 
-	return accepts
+func rawPayment(md metadata.MD) (header string, legacy bool) {
+	if md == nil {
+		return "", false
+	}
+	if values := md.Get(MetadataKeyPaymentSignature); len(values) > 0 && values[0] != "" {
+		return values[0], false
+	}
+	if values := md.Get(MetadataKeyLegacyPayment); len(values) > 0 && values[0] != "" {
+		return values[0], true
+	}
+	return "", false
 }

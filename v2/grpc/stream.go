@@ -6,113 +6,38 @@ import (
 
 	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
-// StreamServerInterceptor creates a gRPC stream server interceptor that enforces x402 payments.
-// Payment is verified BEFORE the stream begins (upfront payment).
+// StreamServerInterceptor enforces x402 on a server stream.
+// The default authorization flow verifies before the first message and settles
+// only when the handler returns nil. Bytes already sent cannot be recalled.
+// A route that must not leak unpaid bytes sets PaymentFlow to upfront.
+// On upfront, a failed handler still gets the settlement receipt in the trailer.
 func StreamServerInterceptor(cfg x402.Config) grpc.StreamServerInterceptor {
-	if err := cfg.Validate(); err != nil {
+	srv, err := x402.NewServer(cfg)
+	if err != nil {
 		panic(fmt.Sprintf("invalid x402 config: %v", err))
 	}
 
-	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	return func(srvImpl interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := ss.Context()
-
-		rule, requiresPayment := cfg.MatchMethod(info.FullMethod)
-		if !requiresPayment {
-			return handler(srv, ss)
-		}
-
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		payload, isV2, err := ExtractPaymentFromMetadata(md)
-		if err != nil {
-			return sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		accepts := BuildPaymentRequirements(rule, info.FullMethod, cfg.ValidityDuration)
-		if len(accepts) == 0 {
-			return status.Error(codes.Internal, "no payment requirements configured")
-		}
-		// A V1 payment names no token, so it pays the rule's first accepted token.
-		requirements := &accepts[0]
-
-		// For V2, the client's chosen token must be one the rule accepts; the
-		// payment is then held to the rule's requirements for that token.
-		var tokenSymbol string
-		if isV2 {
-			matched, symbol := x402.MatchClientToken(rule, payload)
-			if matched == nil {
-				return sendPaymentRequired(rule, info.FullMethod, &cfg)
+		result := srv.Execute(ctx, callFromContext(ctx, info.FullMethod), func(payCtx context.Context) (x402.HandlerOutput, error) {
+			err := handler(srvImpl, &paymentServerStream{ServerStream: ss, ctx: payCtx})
+			return x402.HandlerOutput{}, err
+		})
+		if result.Outcome == x402.OutcomeReplay {
+			payCtx := ctx
+			if result.Payment != nil {
+				payCtx = context.WithValue(ctx, x402.PaymentContextKey, result.Payment)
 			}
-			requirements = matched
-			tokenSymbol = symbol
-		}
-
-		verifyResult, err := cfg.Verifier.Verify(ctx, payload, requirements)
-		if err != nil {
-			return status.Error(codes.Internal, fmt.Sprintf("payment verification error: %v", err))
-		}
-
-		if !verifyResult.Valid {
-			return sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		settlementResult, err := cfg.Verifier.Settle(ctx, payload, requirements)
-		if err != nil {
-			return status.Error(codes.Unavailable, fmt.Sprintf("payment settlement failed: %v", err))
-		}
-
-		if tokenSymbol == "" {
-			tokenSymbol = verifyResult.TokenSymbol
-		}
-
-		paymentCtx := &x402.PaymentContext{
-			Verified:        true,
-			PayerAddress:    verifyResult.PayerAddress,
-			Amount:          verifyResult.Amount,
-			TokenSymbol:     tokenSymbol,
-			Network:         requirements.Network,
-			TransactionHash: settlementResult.TransactionHash,
-			SettledAt:       settlementResult.SettledAt,
-		}
-
-		ctx = context.WithValue(ctx, x402.PaymentContextKey, paymentCtx)
-
-		wrappedStream := &paymentServerStream{
-			ServerStream: ss,
-			ctx:          ctx,
-		}
-
-		handlerErr := handler(srv, wrappedStream)
-
-		if handlerErr == nil {
-			paymentResponse := x402.PaymentResponse{
-				Success:     true,
-				Transaction: settlementResult.TransactionHash,
-				Network:     settlementResult.Network,
-				Payer:       settlementResult.PayerAddress,
-			}
-
-			encoded, encErr := EncodePaymentResponse(&paymentResponse)
-			if encErr == nil {
-				if isV2 {
-					trailer := metadata.Pairs(MetadataKeyPaymentResponse, encoded)
-					wrappedStream.SetTrailer(trailer)
-				} else {
-					trailer := metadata.Pairs(MetadataKeyLegacyPaymentResponse, encoded)
-					wrappedStream.SetTrailer(trailer)
-				}
+			result.Err = handler(srvImpl, &paymentServerStream{ServerStream: ss, ctx: payCtx})
+			if result.Err != nil {
+				result.Outcome = x402.OutcomeHandlerFailed
 			}
 		}
-
-		return handlerErr
+		_, err := finishCall(ctx, result)
+		return err
 	}
 }
 

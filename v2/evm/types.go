@@ -1,59 +1,59 @@
 package evm
 
-// EVMPayload represents the EVM-specific payload in a payment.
-// Following the EIP-3009 transferWithAuthorization specification.
+// EVMPayload is the EIP-3009 payload shape.
+// The exact scheme parses it to bind the authorization, then forwards only
+// these fields. Other schemes are forwarded as opaque JSON, so string
+// timestamps and Permit2 bodies are not rejected in this process.
 type EVMPayload struct {
 	Signature     string         `json:"signature"`
 	Authorization *Authorization `json:"authorization"`
 }
 
-// Authorization contains the EIP-3009 authorization parameters.
+// Authorization contains EIP-3009 authorization parameters.
+// ValidAfter and ValidBefore are JSON values because the spec encodes them
+// as strings. A local integer type would reject a compliant payload.
 type Authorization struct {
-	From        string `json:"from"`
-	To          string `json:"to"`
-	Value       string `json:"value"`
-	ValidAfter  int64  `json:"validAfter"`
-	ValidBefore int64  `json:"validBefore"`
-	Nonce       string `json:"nonce"`
+	From        string      `json:"from"`
+	To          string      `json:"to"`
+	Value       string      `json:"value"`
+	ValidAfter  interface{} `json:"validAfter"`
+	ValidBefore interface{} `json:"validBefore"`
+	Nonce       string      `json:"nonce"`
 }
 
-// FacilitatorVerifyRequest is the V2 request to /v2/x402/verify.
-type FacilitatorVerifyRequest struct {
-	Payload      interface{} `json:"payload"`      // PaymentPayload
-	Requirements interface{} `json:"requirements"` // PaymentRequirements
+// FacilitatorPaymentRequest is the body of POST /verify and POST /settle.
+type FacilitatorPaymentRequest struct {
+	X402Version         int         `json:"x402Version"`
+	PaymentPayload      interface{} `json:"paymentPayload"`
+	PaymentRequirements interface{} `json:"paymentRequirements"`
 }
 
-// FacilitatorVerifyResponse is the V2 response from /v2/x402/verify.
+// FacilitatorVerifyRequest is the body of POST /verify.
+type FacilitatorVerifyRequest = FacilitatorPaymentRequest
+
+// FacilitatorSettleRequest is the body of POST /settle.
+type FacilitatorSettleRequest = FacilitatorPaymentRequest
+
+// FacilitatorVerifyResponse is the decoded /verify response.
+// ExtensionResponses is the EXTENSION-RESPONSES side channel, not part of the JSON body.
 type FacilitatorVerifyResponse struct {
-	IsValid       bool   `json:"isValid"`
-	InvalidReason string `json:"invalidReason,omitempty"`
-	Payer         string `json:"payer,omitempty"`
+	IsValid            bool                   `json:"isValid"`
+	InvalidReason      string                 `json:"invalidReason,omitempty"`
+	Payer              string                 `json:"payer,omitempty"`
+	Extensions         map[string]interface{} `json:"extensions,omitempty"`
+	ExtensionResponses map[string]interface{} `json:"-"`
 }
 
-// FacilitatorSettleRequest is the V2 request to /v2/x402/settle.
-type FacilitatorSettleRequest struct {
-	Payload      interface{} `json:"payload"`
-	Requirements interface{} `json:"requirements"`
-}
-
-// FacilitatorSettleResponse is the V2 response from /v2/x402/settle.
+// FacilitatorSettleResponse is the decoded /settle response.
+// Success false is a settlement result. It includes settlement_pending,
+// which keeps Transaction.
 type FacilitatorSettleResponse struct {
-	Success     bool   `json:"success"`
-	ErrorReason string `json:"errorReason,omitempty"`
-	Payer       string `json:"payer,omitempty"`
-	Transaction string `json:"transaction,omitempty"`
-	Network     string `json:"network,omitempty"` // CAIP-2
-}
-
-// FacilitatorSupportedResponse is the V2 response from /v2/x402/supported.
-type FacilitatorSupportedResponse struct {
-	Kinds      []SupportedKind   `json:"kinds"`
-	Extensions []string          `json:"extensions"`
-	Signers    map[string]string `json:"signers"`
-}
-
-// SupportedKind represents a supported scheme+network pair.
-type SupportedKind struct {
-	Scheme  string `json:"scheme"`
-	Network string `json:"network"`
+	Success            bool                   `json:"success"`
+	ErrorReason        string                 `json:"errorReason,omitempty"`
+	Payer              string                 `json:"payer,omitempty"`
+	Transaction        string                 `json:"transaction"`
+	Network            string                 `json:"network"`
+	Amount             string                 `json:"amount,omitempty"`
+	Extensions         map[string]interface{} `json:"extensions,omitempty"`
+	ExtensionResponses map[string]interface{} `json:"-"`
 }

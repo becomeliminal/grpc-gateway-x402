@@ -2,244 +2,317 @@ package grpc
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"reflect"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-const paidMethod = "/test.v1.TestService/Paid"
-
-// recordingVerifier records the requirements each payment is verified and
-// settled against. When forbidden is set, reaching it fails the test.
-type recordingVerifier struct {
-	t         *testing.T
-	forbidden bool
-	verified  *x402.PaymentRequirements
-	settled   *x402.PaymentRequirements
+type grpcMock struct {
+	verify int
+	settle int
+	result *x402.SettlementResult
 }
 
-func (v *recordingVerifier) Verify(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.VerificationResult, error) {
-	if v.forbidden {
-		v.t.Errorf("Verify called with requirements %+v", requirements)
+func (m *grpcMock) Verify(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.VerificationResult, error) {
+	m.verify++
+	return &x402.VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: "1000000"}, nil
+}
+
+func (m *grpcMock) Settle(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.SettlementResult, error) {
+	m.settle++
+	if m.result != nil {
+		return m.result, nil
 	}
-	v.verified = requirements
-	return &x402.VerificationResult{Valid: true, PayerAddress: "0xPayer", Amount: requirements.Amount}, nil
+	return &x402.SettlementResult{Success: true, TransactionHash: "0xtx", Network: "eip155:84532", PayerAddress: "0xPayer", Amount: "1000000"}, nil
 }
 
-func (v *recordingVerifier) Settle(ctx context.Context, payload *x402.PaymentPayload, requirements *x402.PaymentRequirements) (*x402.SettlementResult, error) {
-	if v.forbidden {
-		v.t.Errorf("Settle called with requirements %+v", requirements)
-	}
-	v.settled = requirements
-	return &x402.SettlementResult{TransactionHash: "0xtx", Network: requirements.Network}, nil
-}
+func (m *grpcMock) SupportedKinds() []x402.SupportedKind { return nil }
 
-func (v *recordingVerifier) SupportedKinds() []x402.SupportedKind { return nil }
-
-// twoTokenRule accepts USDC on Base Sepolia or on Arbitrum, each paid to its
-// own recipient.
-func twoTokenRule() x402.PricingRule {
-	return x402.PricingRule{
-		AcceptedTokens: []x402.TokenRequirement{
-			{Network: "eip155:84532", Symbol: "USDC", AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", Recipient: "0xRecipientA", Amount: "1000000", TokenName: "USDC", TokenVersion: "2"},
-			{Network: "eip155:42161", Symbol: "USDC", AssetContract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", Recipient: "0xRecipientB", Amount: "2000000", TokenName: "USD Coin", TokenVersion: "2"},
+func paidConfig(v x402.ChainVerifier) x402.Config {
+	return x402.Config{
+		Verifier: v,
+		EndpointPricing: map[string]x402.PricingRule{
+			"/v1/paid": paidRule(),
+		},
+		MethodPricing: map[string]x402.PricingRule{
+			"/test.Service/Pay": paidRule(),
 		},
 	}
 }
 
-func twoTokenConfig(v *recordingVerifier) x402.Config {
-	return x402.Config{
-		Verifier:      v,
-		MethodPricing: map[string]x402.PricingRule{paidMethod: twoTokenRule()},
+func paidRule() x402.PricingRule {
+	return x402.PricingRule{
+		Description: "premium",
+		MimeType:    "application/json",
+		ResourceURL: "https://api.example.com/v1/paid",
+		AcceptedTokens: []x402.TokenRequirement{
+			{
+				Network:       "eip155:84532",
+				Symbol:        "USDC",
+				AssetContract: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+				Recipient:     "0xRecipient",
+				Amount:        "1000000",
+				TokenName:     "USD Coin",
+				TokenVersion:  "2",
+			},
+		},
 	}
 }
 
-// unacceptedV2 is a V2 payment in a token the rule does not accept.
-func unacceptedV2(t *testing.T) metadata.MD {
-	t.Helper()
-	return v2Metadata(t, x402.PaymentRequirements{
-		Scheme: "exact", Network: "eip155:84532", Amount: "1",
-		Asset: "0x0000000000000000000000000000000000000bad", PayTo: "0xPayer",
-	})
+type trailerStream struct {
+	trailer metadata.MD
 }
 
-// secondTokenV2 is a V2 payment choosing the rule's second token, claiming a
-// lower amount and another recipient than the rule sets.
-func secondTokenV2(t *testing.T) metadata.MD {
-	t.Helper()
-	return v2Metadata(t, x402.PaymentRequirements{
-		Scheme: "exact", Network: "eip155:42161", Amount: "1",
-		Asset: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", PayTo: "0xPayer",
-	})
+func (s *trailerStream) Method() string                  { return "/test.Service/Pay" }
+func (s *trailerStream) SetHeader(md metadata.MD) error  { return nil }
+func (s *trailerStream) SendHeader(md metadata.MD) error { return nil }
+func (s *trailerStream) SetTrailer(md metadata.MD) error {
+	s.trailer = metadata.Join(s.trailer, md)
+	return nil
 }
 
-func v2Metadata(t *testing.T, accepted x402.PaymentRequirements) metadata.MD {
-	t.Helper()
-	encoded, err := EncodePaymentPayload(&x402.PaymentPayload{
-		X402Version: 2,
-		Accepted:    accepted,
-		Payload:     map[string]interface{}{"signature": "0xsig"},
-	})
+func withTrailers(ctx context.Context) (context.Context, *trailerStream) {
+	stream := &trailerStream{}
+	return grpc.NewContextWithServerTransportStream(ctx, stream), stream
+}
+
+func TestGRPCChallengeMatchesHTTP(t *testing.T) {
+	cfg := paidConfig(&grpcMock{})
+	httpHandler := x402.PaymentMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	req := httptest.NewRequest(http.MethodGet, "/v1/paid", nil)
+	rec := httptest.NewRecorder()
+	httpHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("http status %d", rec.Code)
+	}
+	httpChallenge, err := DecodePaymentRequirements(rec.Header().Get(x402.HeaderPaymentRequired))
 	if err != nil {
-		t.Fatalf("encoding payment: %v", err)
+		t.Fatal(err)
 	}
-	return metadata.Pairs(MetadataKeyPaymentSignature, encoded)
+
+	ctx, stream := withTrailers(context.Background())
+	interceptor := UnaryServerInterceptor(cfg)
+	_, err = interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Error("handler ran")
+		return "nope", nil
+	})
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.ResourceExhausted || st.Message() != "payment_required" {
+		t.Fatalf("status = %v", err)
+	}
+	var info *errdetails.ErrorInfo
+	for _, detail := range st.Details() {
+		if got, ok := detail.(*errdetails.ErrorInfo); ok {
+			info = got
+		}
+	}
+	if info == nil || info.Reason != "PAYMENT_REQUIRED" || info.Domain != "x402.org" {
+		t.Fatalf("error info = %+v", info)
+	}
+	values := stream.trailer.Get(MetadataKeyPaymentRequired)
+	if len(values) != 1 {
+		t.Fatalf("payment-required trailer = %v", stream.trailer)
+	}
+	grpcChallenge, err := DecodePaymentRequirements(values[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	httpJSON, _ := json.Marshal(httpChallenge)
+	grpcJSON, _ := json.Marshal(grpcChallenge)
+	if string(httpJSON) != string(grpcJSON) {
+		t.Errorf("http %s\ngrpc %s", httpJSON, grpcJSON)
+	}
 }
 
-func v1Metadata(t *testing.T) metadata.MD {
-	t.Helper()
-	legacyJSON, err := json.Marshal(x402.LegacyPayment{
-		X402Version: 1, Scheme: "exact", Network: "base-sepolia",
+func TestUnaryAuthorizationFlow(t *testing.T) {
+	mock := &grpcMock{}
+	interceptor := UnaryServerInterceptor(paidConfig(mock))
+	header, err := EncodePaymentPayload(&x402.PaymentPayload{
+		X402Version: 2,
+		Accepted: x402.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "1000000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "USD Coin", "version": "2"},
+		},
 		Payload: map[string]interface{}{"signature": "0xsig"},
 	})
 	if err != nil {
-		t.Fatalf("encoding legacy payment: %v", err)
+		t.Fatal(err)
 	}
-	return metadata.Pairs(MetadataKeyLegacyPayment, base64.StdEncoding.EncodeToString(legacyJSON))
-}
 
-// secondTokenRequirements are the rule's own requirements for its second token.
-var secondTokenRequirements = &x402.PaymentRequirements{
-	Scheme: "exact", Network: "eip155:42161", Amount: "2000000",
-	Asset: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", PayTo: "0xRecipientB",
-}
-
-// firstTokenRequirements are the rule's own requirements for its first token.
-var firstTokenRequirements = &x402.PaymentRequirements{
-	Scheme: "exact", Network: "eip155:84532", Amount: "1000000",
-	Asset: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", PayTo: "0xRecipientA",
-}
-
-// requirePaymentRequired asserts err is the payment-required status carrying
-// the method's requirements.
-func requirePaymentRequired(t *testing.T, err error) {
-	t.Helper()
-	st, ok := status.FromError(err)
-	if !ok || st.Code() != codes.ResourceExhausted {
-		t.Fatalf("error = %v, want a ResourceExhausted payment-required status", err)
+	ctx, stream := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, header)))
+	var during string
+	resp, err := interceptor(ctx, "req", &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		payment, ok := GetPaymentFromContext(ctx)
+		if !ok {
+			t.Fatal("missing payment context")
+		}
+		during = payment.TransactionHash
+		return "resource", nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	decoded, decErr := DecodePaymentRequirements(st.Message())
+	if resp != "resource" {
+		t.Errorf("resp = %v", resp)
+	}
+	if during != "" {
+		t.Errorf("tx hash during handler = %q", during)
+	}
+	if mock.verify != 1 || mock.settle != 1 {
+		t.Errorf("verify %d settle %d", mock.verify, mock.settle)
+	}
+	receipts := stream.trailer.Get(MetadataKeyPaymentResponse)
+	if len(receipts) != 1 {
+		t.Fatalf("trailer = %v", stream.trailer)
+	}
+	receipt, err := DecodePaymentResponse(receipts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.Success || receipt.Transaction != "0xtx" {
+		t.Errorf("receipt = %+v", receipt)
+	}
+}
+
+func TestUnaryMalformedPayment(t *testing.T) {
+	interceptor := UnaryServerInterceptor(paidConfig(&grpcMock{}))
+	ctx, _ := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, "%%%")))
+	_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Error("handler ran")
+		return nil, nil
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code = %v", err)
+	}
+}
+
+func TestUnarySettleFailureDiscardsResponse(t *testing.T) {
+	mock := &grpcMock{result: &x402.SettlementResult{
+		Success: false, ErrorReason: "settlement_pending", TransactionHash: "0xpending", Network: "eip155:84532", PayerAddress: "0xPayer",
+	}}
+	interceptor := UnaryServerInterceptor(paidConfig(mock))
+	header := mustPayload(t)
+	ctx, stream := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, header)))
+	resp, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return "secret", nil
+	})
+	if resp != nil {
+		t.Errorf("response released: %v", resp)
+	}
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("code = %v", err)
+	}
+	receipt, decErr := DecodePaymentResponse(stream.trailer.Get(MetadataKeyPaymentResponse)[0])
 	if decErr != nil {
-		t.Fatalf("status message is not encoded requirements: %v", decErr)
+		t.Fatal(decErr)
 	}
-	rule := twoTokenRule()
-	want := BuildPaymentRequirements(&rule, paidMethod, nil)
-	if !reflect.DeepEqual(decoded.Accepts, want) {
-		t.Errorf("requirements = %+v, want %+v", decoded.Accepts, want)
+	if receipt.Success || receipt.Transaction != "0xpending" {
+		t.Errorf("receipt = %+v", receipt)
+	}
+	if mock.settle != 2 {
+		t.Errorf("settle calls = %d", mock.settle)
 	}
 }
 
-func TestUnaryInterceptor_V2UnacceptedToken_PaymentRequiredWithoutVerifying(t *testing.T) {
-	// GIVEN a method accepting two tokens, and a verifier that must not run
-	v := &recordingVerifier{t: t, forbidden: true}
-	interceptor := UnaryServerInterceptor(twoTokenConfig(v))
+func TestUnaryPaymentIdentifierConflict(t *testing.T) {
+	mock := &grpcMock{}
+	interceptor := UnaryServerInterceptor(paidConfig(mock))
+	const id = "pay_7d5d747be160e280"
+	first := mustPayloadWithID(t, id, "0xsig")
+	ctx, _ := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, first)))
+	resp, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return "secret", nil
+	})
+	if err != nil || resp != "secret" {
+		t.Fatalf("first call resp %v err %v", resp, err)
+	}
 
-	// WHEN a V2 payment arrives in a token the method does not accept
-	ctx := metadata.NewIncomingContext(context.Background(), unacceptedV2(t))
-	_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: paidMethod},
-		func(ctx context.Context, req interface{}) (interface{}, error) {
-			t.Error("handler reached for a payment in an unaccepted token")
-			return nil, nil
-		})
-
-	// THEN it is refused with the method's payment requirements
-	requirePaymentRequired(t, err)
+	second := mustPayloadWithID(t, id, "0xother")
+	ctx, _ = withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, second)))
+	_, err = interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		t.Error("handler ran")
+		return "secret", nil
+	})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("code = %v", err)
+	}
+	if status.Convert(err).Message() != "payment_identifier_conflict" {
+		t.Fatalf("message = %s", status.Convert(err).Message())
+	}
+	if mock.settle != 1 {
+		t.Errorf("settle calls = %d", mock.settle)
+	}
 }
 
-func TestUnaryInterceptor_V2AcceptedToken_UsesTheRulesRequirements(t *testing.T) {
-	// GIVEN a method accepting two tokens
-	v := &recordingVerifier{t: t}
-	interceptor := UnaryServerInterceptor(twoTokenConfig(v))
+func TestUnaryHandlerErrorDoesNotSettle(t *testing.T) {
+	mock := &grpcMock{}
+	interceptor := UnaryServerInterceptor(paidConfig(mock))
+	ctx, _ := withTrailers(metadata.NewIncomingContext(context.Background(), metadata.Pairs(MetadataKeyPaymentSignature, mustPayload(t))))
+	_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Service/Pay"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return nil, status.Error(codes.Internal, "boom")
+	})
+	if status.Code(err) != codes.Internal || mock.settle != 0 || mock.verify != 1 {
+		t.Fatalf("err %v verify %d settle %d", err, mock.verify, mock.settle)
+	}
+}
 
-	// WHEN a V2 payment arrives in the second token
-	var paid *x402.PaymentContext
-	ctx := metadata.NewIncomingContext(context.Background(), secondTokenV2(t))
-	_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: paidMethod},
-		func(ctx context.Context, req interface{}) (interface{}, error) {
-			paid, _ = GetPaymentFromContext(ctx)
-			return "ok", nil
-		})
-
-	// THEN it is verified and settled against the rule's own requirements for
-	// that token, and the handler sees the payment
+func mustPayload(t *testing.T) string {
+	t.Helper()
+	header, err := EncodePaymentPayload(&x402.PaymentPayload{
+		X402Version: 2,
+		Accepted: x402.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "1000000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "USD Coin", "version": "2"},
+		},
+		Payload: map[string]interface{}{"signature": "0xsig"},
+	})
 	if err != nil {
-		t.Fatalf("interceptor error: %v", err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.verified, secondTokenRequirements) || !reflect.DeepEqual(v.settled, secondTokenRequirements) {
-		t.Errorf("verified %+v, settled %+v, want %+v", v.verified, v.settled, secondTokenRequirements)
-	}
-	if paid == nil || paid.Network != "eip155:42161" || paid.TokenSymbol != "USDC" || !paid.Verified {
-		t.Errorf("payment context = %+v", paid)
-	}
+	return header
 }
 
-func TestUnaryInterceptor_V1Payment_PaysTheFirstAcceptedToken(t *testing.T) {
-	// GIVEN a method accepting two tokens
-	v := &recordingVerifier{t: t}
-	interceptor := UnaryServerInterceptor(twoTokenConfig(v))
-
-	// WHEN a V1 payment arrives — V1 names no token
-	ctx := metadata.NewIncomingContext(context.Background(), v1Metadata(t))
-	_, err := interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: paidMethod},
-		func(ctx context.Context, req interface{}) (interface{}, error) { return "ok", nil })
-
-	// THEN it is verified against the first accepted token
+func mustPayloadWithID(t *testing.T, id, signature string) string {
+	t.Helper()
+	header, err := EncodePaymentPayload(&x402.PaymentPayload{
+		X402Version: 2,
+		Accepted: x402.PaymentRequirements{
+			Scheme:            "exact",
+			Network:           "eip155:84532",
+			Amount:            "1000000",
+			Asset:             "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+			PayTo:             "0xRecipient",
+			MaxTimeoutSeconds: 300,
+			Extra:             map[string]interface{}{"name": "USD Coin", "version": "2"},
+		},
+		Payload: map[string]interface{}{"signature": signature},
+		Extensions: map[string]interface{}{
+			x402.ExtensionPaymentIdentifier: map[string]interface{}{
+				"info": map[string]interface{}{"id": id},
+			},
+		},
+	})
 	if err != nil {
-		t.Fatalf("interceptor error: %v", err)
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(v.verified, firstTokenRequirements) {
-		t.Errorf("verified %+v, want %+v", v.verified, firstTokenRequirements)
-	}
-}
-
-// fakeServerStream is a ServerStream carrying only a context.
-type fakeServerStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s *fakeServerStream) Context() context.Context { return s.ctx }
-func (s *fakeServerStream) SetTrailer(metadata.MD)   {}
-
-func TestStreamInterceptor_V2UnacceptedToken_PaymentRequiredWithoutVerifying(t *testing.T) {
-	// GIVEN a streaming method accepting two tokens, and a verifier that must not run
-	v := &recordingVerifier{t: t, forbidden: true}
-	interceptor := StreamServerInterceptor(twoTokenConfig(v))
-
-	// WHEN a V2 payment arrives in a token the method does not accept
-	ss := &fakeServerStream{ctx: metadata.NewIncomingContext(context.Background(), unacceptedV2(t))}
-	err := interceptor(nil, ss, &grpc.StreamServerInfo{FullMethod: paidMethod},
-		func(srv interface{}, stream grpc.ServerStream) error {
-			t.Error("handler reached for a payment in an unaccepted token")
-			return nil
-		})
-
-	// THEN it is refused with the method's payment requirements
-	requirePaymentRequired(t, err)
-}
-
-func TestStreamInterceptor_V2AcceptedToken_UsesTheRulesRequirements(t *testing.T) {
-	// GIVEN a streaming method accepting two tokens
-	v := &recordingVerifier{t: t}
-	interceptor := StreamServerInterceptor(twoTokenConfig(v))
-
-	// WHEN a V2 payment arrives in the second token
-	ss := &fakeServerStream{ctx: metadata.NewIncomingContext(context.Background(), secondTokenV2(t))}
-	err := interceptor(nil, ss, &grpc.StreamServerInfo{FullMethod: paidMethod},
-		func(srv interface{}, stream grpc.ServerStream) error { return nil })
-
-	// THEN it is verified and settled against the rule's own requirements for that token
-	if err != nil {
-		t.Fatalf("interceptor error: %v", err)
-	}
-	if !reflect.DeepEqual(v.verified, secondTokenRequirements) || !reflect.DeepEqual(v.settled, secondTokenRequirements) {
-		t.Errorf("verified %+v, settled %+v, want %+v", v.verified, v.settled, secondTokenRequirements)
-	}
+	return header
 }

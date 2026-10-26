@@ -24,7 +24,7 @@ If you can build an API, you can monetize it with a few lines of code.
 ## Running
 
 ```bash
-export FACILITATOR_URL="https://facilitator.x402.org"
+export FACILITATOR_URL="https://x402.org/facilitator"
 export RECIPIENT_ADDRESS="0xYourAddress"
 go run main.go
 ```
@@ -40,19 +40,18 @@ curl -v http://localhost:8080/v1/joke
 Response:
 ```json
 {
-  "error": "Payment required",
-  "paymentRequirements": [
-    {
-      "x402Version": 1,
-      "scheme": "exact",
-      "network": "base-sepolia",
-      "maxAmountRequired": "0.0001",
-      "resource": "/v1/joke",
-      "description": "Get a programming joke",
-      "recipient": "0xYourAddress",
-      "assetContract": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-    }
-  ]
+  "x402Version": 2,
+  "error": "PAYMENT-SIGNATURE header is required",
+  "resource": {"url": "http://localhost:8080/v1/joke", "description": "Get a programming joke"},
+  "accepts": [{
+    "scheme": "exact",
+    "network": "eip155:84532",
+    "amount": "100",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "payTo": "0xYourAddress",
+    "maxTimeoutSeconds": 300,
+    "extra": {"name": "USDC", "version": "2"}
+  }]
 }
 ```
 

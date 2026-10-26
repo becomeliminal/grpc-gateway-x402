@@ -3,138 +3,145 @@ package grpc
 import (
 	"context"
 	"fmt"
+	"time"
 
 	x402 "github.com/becomeliminal/grpc-gateway-x402/v2"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-// UnaryServerInterceptor creates a gRPC unary server interceptor that enforces x402 payments.
-// Detects V2 metadata (payment-signature) first, falls back to V1 (x402-payment).
+// UnaryServerInterceptor enforces x402 on a unary RPC.
+// The handler return value is withheld until settlement finishes on the
+// authorization flow, which is the gRPC equivalent of buffering an HTTP body.
 func UnaryServerInterceptor(cfg x402.Config) grpc.UnaryServerInterceptor {
-	if err := cfg.Validate(); err != nil {
+	srv, err := x402.NewServer(cfg)
+	if err != nil {
 		panic(fmt.Sprintf("invalid x402 config: %v", err))
 	}
 
 	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		rule, requiresPayment := cfg.MatchMethod(info.FullMethod)
-		if !requiresPayment {
-			return handler(ctx, req)
-		}
-
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return nil, sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		// Extract payment (V2 first, V1 fallback).
-		payload, isV2, err := ExtractPaymentFromMetadata(md)
-		if err != nil {
-			return nil, sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		// Build requirements from the matched pricing rule.
-		accepts := BuildPaymentRequirements(rule, info.FullMethod, cfg.ValidityDuration)
-		if len(accepts) == 0 {
-			return nil, status.Error(codes.Internal, "no payment requirements configured")
-		}
-		// A V1 payment names no token, so it pays the rule's first accepted token.
-		requirements := &accepts[0]
-
-		// For V2, the client's chosen token must be one the rule accepts; the
-		// payment is then held to the rule's requirements for that token.
-		var tokenSymbol string
-		if isV2 {
-			matched, symbol := x402.MatchClientToken(rule, payload)
-			if matched == nil {
-				return nil, sendPaymentRequired(rule, info.FullMethod, &cfg)
+		result := srv.Execute(ctx, callFromContext(ctx, info.FullMethod), func(payCtx context.Context) (x402.HandlerOutput, error) {
+			resp, err := handler(payCtx, req)
+			return x402.HandlerOutput{GRPC: resp, HasGRPC: true}, err
+		})
+		if result.Outcome == x402.OutcomeReplay && !result.Output.HasGRPC {
+			payCtx := ctx
+			if result.Payment != nil {
+				payCtx = context.WithValue(ctx, x402.PaymentContextKey, result.Payment)
 			}
-			requirements = matched
-			tokenSymbol = symbol
+			resp, err := handler(payCtx, req)
+			result.Output.GRPC = resp
+			result.Output.HasGRPC = true
+			result.Err = err
 		}
-
-		// Verify the payment.
-		verifyResult, err := cfg.Verifier.Verify(ctx, payload, requirements)
-		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("payment verification error: %v", err))
-		}
-
-		if !verifyResult.Valid {
-			return nil, sendPaymentRequired(rule, info.FullMethod, &cfg)
-		}
-
-		// Settle the payment on-chain.
-		settlementResult, err := cfg.Verifier.Settle(ctx, payload, requirements)
-		if err != nil {
-			return nil, status.Error(codes.Unavailable, fmt.Sprintf("payment settlement failed: %v", err))
-		}
-
-		// Resolve token symbol from rule match or verifier.
-		if tokenSymbol == "" {
-			tokenSymbol = verifyResult.TokenSymbol
-		}
-
-		// Create payment context.
-		paymentCtx := &x402.PaymentContext{
-			Verified:        true,
-			PayerAddress:    verifyResult.PayerAddress,
-			Amount:          verifyResult.Amount,
-			TokenSymbol:     tokenSymbol,
-			Network:         requirements.Network,
-			TransactionHash: settlementResult.TransactionHash,
-			SettledAt:       settlementResult.SettledAt,
-		}
-
-		ctx = context.WithValue(ctx, x402.PaymentContextKey, paymentCtx)
-
-		resp, err := handler(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-
-		// Set response metadata (version-aware).
-		paymentResponse := x402.PaymentResponse{
-			Success:     true,
-			Transaction: settlementResult.TransactionHash,
-			Network:     settlementResult.Network,
-			Payer:       settlementResult.PayerAddress,
-		}
-
-		encoded, encErr := EncodePaymentResponse(&paymentResponse)
-		if encErr == nil {
-			if isV2 {
-				trailer := metadata.Pairs(MetadataKeyPaymentResponse, encoded)
-				grpc.SetTrailer(ctx, trailer)
-			} else {
-				trailer := metadata.Pairs(MetadataKeyLegacyPaymentResponse, encoded)
-				grpc.SetTrailer(ctx, trailer)
-			}
-		}
-
-		return resp, nil
+		return finishCall(ctx, result)
 	}
 }
 
-func sendPaymentRequired(rule *x402.PricingRule, fullMethod string, cfg *x402.Config) error {
-	accepts := BuildPaymentRequirements(rule, fullMethod, cfg.ValidityDuration)
+func callFromContext(ctx context.Context, fullMethod string) x402.Call {
+	md, _ := metadata.FromIncomingContext(ctx)
+	header, legacy := rawPayment(md)
+	var deadline time.Duration
+	if until, ok := ctx.Deadline(); ok {
+		deadline = time.Until(until)
+	}
+	return x402.Call{
+		RouteKey:      fullMethod,
+		GRPC:          true,
+		Deadline:      deadline,
+		PaymentHeader: header,
+		Legacy:        legacy,
+		Method:        fullMethod,
+	}
+}
 
-	encoded, err := EncodePaymentRequirements(accepts)
+func finishCall(ctx context.Context, result x402.Result) (interface{}, error) {
+	switch result.Outcome {
+	case x402.OutcomeFree:
+		return result.Output.GRPC, result.Err
+	case x402.OutcomePaymentRequired:
+		return nil, paymentRequiredError(ctx, result)
+	case x402.OutcomeInvalid:
+		reason := result.Reason
+		if reason == "" {
+			reason = "invalid_payment"
+		}
+		return nil, status.Error(codes.InvalidArgument, reason)
+	case x402.OutcomeConflict:
+		return nil, status.Error(codes.AlreadyExists, result.Reason)
+	case x402.OutcomeInternal, x402.OutcomeBufferOverflow:
+		return nil, status.Error(codes.Internal, result.Reason)
+	case x402.OutcomeHandlerFailed:
+		setReceiptTrailer(ctx, result)
+		return result.Output.GRPC, result.Err
+	case x402.OutcomeSettled, x402.OutcomeReplay:
+		setReceiptTrailer(ctx, result)
+		return result.Output.GRPC, result.Err
+	case x402.OutcomeSettleFailed:
+		setReceiptTrailer(ctx, result)
+		return nil, status.Error(codes.ResourceExhausted, result.Reason)
+	default:
+		return nil, status.Error(codes.Internal, "payment_processing_failed")
+	}
+}
+
+func paymentRequiredError(ctx context.Context, result x402.Result) error {
+	reason := result.Reason
+	if reason == "" {
+		reason = "payment_required"
+	}
+	st := status.New(codes.ResourceExhausted, reason)
+	if detailed, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: "PAYMENT_REQUIRED",
+		Domain: "x402.org",
+	}); err == nil {
+		st = detailed
+	}
+	if result.Challenge != nil {
+		if encoded, err := EncodePaymentRequired(result.Challenge); err == nil {
+			_ = grpc.SetTrailer(ctx, metadata.Pairs(MetadataKeyPaymentRequired, encoded))
+		}
+	}
+	return st.Err()
+}
+
+func setReceiptTrailer(ctx context.Context, result x402.Result) {
+	if result.Receipt == nil {
+		return
+	}
+	encoded, err := EncodePaymentResponse(result.Receipt)
 	if err != nil {
-		return status.Error(codes.Internal, fmt.Sprintf("failed to encode payment requirements: %v", err))
+		return
 	}
-
-	return status.Error(codes.ResourceExhausted, encoded)
+	key := MetadataKeyPaymentResponse
+	if result.Legacy {
+		key = MetadataKeyLegacyPaymentResponse
+	}
+	_ = grpc.SetTrailer(ctx, metadata.Pairs(key, encoded))
 }
 
-// GetPaymentFromContext extracts payment information from the gRPC context.
+// GetPaymentFromContext extracts the verified payment from a handler context.
 func GetPaymentFromContext(ctx context.Context) (*x402.PaymentContext, bool) {
+	payment, ok := ctx.Value(x402.PaymentContextKey).(*PaymentContextValue)
+	if ok {
+		return payment, true
+	}
+	return x402Payment(ctx)
+}
+
+// PaymentContextValue is an alias kept so existing callers compile.
+// The value stored by the server is *x402.PaymentContext.
+type PaymentContextValue = x402.PaymentContext
+
+func x402Payment(ctx context.Context) (*x402.PaymentContext, bool) {
 	payment, ok := ctx.Value(x402.PaymentContextKey).(*x402.PaymentContext)
 	return payment, ok
 }
 
-// RequirePayment extracts payment from context and returns error if not found.
+// RequirePayment extracts payment from context and returns an error if it is missing.
 func RequirePayment(ctx context.Context) (*x402.PaymentContext, error) {
 	payment, ok := GetPaymentFromContext(ctx)
 	if !ok {
