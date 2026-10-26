@@ -8,19 +8,19 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// WithPaymentMetadata returns a ServeMuxOption that propagates payment information
-// from HTTP context to gRPC metadata, making it accessible in gRPC handlers
+// WithPaymentMetadata copies the verified payment into gRPC metadata so handlers
+// written in any language can read it. On the authorization flow
+// x-payment-tx-hash is empty: settlement runs after the handler returns.
+// The hash is set only when the route already settled (upfront or escrow).
 func WithPaymentMetadata() runtime.ServeMuxOption {
 	return runtime.WithMetadata(func(ctx context.Context, r *http.Request) metadata.MD {
 		md := metadata.MD{}
 
-		// Extract payment context
 		payment, ok := GetPaymentFromContext(ctx)
 		if !ok || payment == nil {
 			return md
 		}
 
-		// Add payment information to gRPC metadata
 		if payment.Verified {
 			md.Set("x-payment-verified", "true")
 			md.Set("x-payment-payer", payment.PayerAddress)
@@ -40,21 +40,18 @@ func WithPaymentMetadata() runtime.ServeMuxOption {
 	})
 }
 
-// GetPaymentFromGRPCContext extracts payment information from gRPC metadata
-// Use this in gRPC handlers to access payment details
+// GetPaymentFromGRPCContext extracts payment information from gRPC metadata.
 func GetPaymentFromGRPCContext(ctx context.Context) (*PaymentContext, bool) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return nil, false
 	}
 
-	// Check if payment was verified
 	verified := md.Get("x-payment-verified")
 	if len(verified) == 0 || verified[0] != "true" {
 		return nil, false
 	}
 
-	// Extract payment details
 	payment := &PaymentContext{
 		Verified: true,
 	}
@@ -82,8 +79,7 @@ func GetPaymentFromGRPCContext(ctx context.Context) (*PaymentContext, bool) {
 	return payment, true
 }
 
-// GetHTTPPathPattern extracts the HTTP path pattern from grpc-gateway context
-// This is useful if you need to make payment decisions based on the matched route
+// GetHTTPPathPattern extracts the HTTP path pattern from grpc-gateway context.
 func GetHTTPPathPattern(ctx context.Context) (string, bool) {
 	pattern, ok := runtime.HTTPPathPattern(ctx)
 	return pattern, ok

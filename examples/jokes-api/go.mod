@@ -5,7 +5,7 @@ go 1.22.7
 toolchain go1.23.4
 
 require (
-	github.com/becomeliminal/grpc-gateway-x402/v2 v2.0.0
+	github.com/becomeliminal/grpc-gateway-x402 v1.0.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0
 	google.golang.org/grpc v1.69.4
 )
@@ -19,4 +19,4 @@ require (
 	google.golang.org/protobuf v1.36.4 // indirect
 )
 
-replace github.com/becomeliminal/grpc-gateway-x402/v2 => ../../v2
+replace github.com/becomeliminal/grpc-gateway-x402 => ../..

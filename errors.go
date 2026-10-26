@@ -2,9 +2,7 @@ package x402
 
 import "fmt"
 
-// Error types for better error handling
-
-// PaymentError represents an error related to payment processing
+// PaymentError represents an error related to payment processing.
 type PaymentError struct {
 	Code    string
 	Message string
@@ -22,18 +20,18 @@ func (e *PaymentError) Unwrap() error {
 	return e.Cause
 }
 
-// Error codes
+// Error codes.
 const (
-	ErrCodeInvalidPayment    = "INVALID_PAYMENT"
-	ErrCodeVerificationFailed = "VERIFICATION_FAILED"
-	ErrCodeSettlementFailed  = "SETTLEMENT_FAILED"
-	ErrCodeInvalidConfig     = "INVALID_CONFIG"
+	ErrCodeInvalidPayment      = "INVALID_PAYMENT"
+	ErrCodeVerificationFailed  = "VERIFICATION_FAILED"
+	ErrCodeSettlementFailed    = "SETTLEMENT_FAILED"
+	ErrCodeInvalidConfig       = "INVALID_CONFIG"
 	ErrCodeNetworkNotSupported = "NETWORK_NOT_SUPPORTED"
-	ErrCodeInsufficientAmount = "INSUFFICIENT_AMOUNT"
-	ErrCodeExpiredPayment    = "EXPIRED_PAYMENT"
+	ErrCodeInsufficientAmount  = "INSUFFICIENT_AMOUNT"
+	ErrCodeExpiredPayment      = "EXPIRED_PAYMENT"
 )
 
-// NewPaymentError creates a new PaymentError
+// NewPaymentError creates a new PaymentError.
 func NewPaymentError(code, message string, cause error) *PaymentError {
 	return &PaymentError{
 		Code:    code,
@@ -42,13 +40,13 @@ func NewPaymentError(code, message string, cause error) *PaymentError {
 	}
 }
 
-// IsPaymentError checks if an error is a PaymentError
+// IsPaymentError checks if an error is a PaymentError.
 func IsPaymentError(err error) bool {
 	_, ok := err.(*PaymentError)
 	return ok
 }
 
-// GetPaymentErrorCode extracts the error code from a PaymentError
+// GetPaymentErrorCode extracts the error code from a PaymentError.
 func GetPaymentErrorCode(err error) string {
 	if pe, ok := err.(*PaymentError); ok {
 		return pe.Code

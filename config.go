@@ -1,91 +1,163 @@
 package x402
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
 	"time"
 )
 
-// Config holds the middleware configuration
+// DefaultMaxBufferBytes is the body retained until settlement on the authorization flow.
+const DefaultMaxBufferBytes = 1 << 20
+
+// UsageFunc reports units consumed by a handler.
+// Fixed-price routes ignore it. A later upto settlement can read it
+// without a second rewrite of the resource server.
+type UsageFunc func(ctx context.Context) (amount string, ok bool)
+
+// ExtensionHook receives facilitator EXTENSION-RESPONSES.
+// The map is not written to the buyer-facing receipt and is not logged.
+type ExtensionHook func(responses map[string]interface{})
+
+// Config holds the middleware configuration.
 type Config struct {
-	// Verifier is the payment verification backend (e.g., EVMVerifier)
+	// Verifier is the payment verification backend (for example EVMVerifier).
 	Verifier ChainVerifier
 
-	// EndpointPricing maps URL patterns to pricing rules
-	// Patterns support exact matches ("/v1/endpoint") and wildcards ("/v1/*")
-	// Used by HTTP middleware (grpc-gateway)
+	// EndpointPricing maps URL patterns to pricing rules.
+	// Patterns support exact matches ("/v1/endpoint") and wildcards ("/v1/*").
+	// Used by HTTP middleware (grpc-gateway). The priced URL is resource.url.
 	EndpointPricing map[string]PricingRule
 
-	// MethodPricing maps gRPC method names to pricing rules
-	// Methods are full names like "/package.Service/Method"
-	// Supports wildcards: "/package.Service/*" matches all methods in a service
-	// Used by native gRPC interceptors
+	// MethodPricing maps gRPC method names to pricing rules.
+	// Methods are full names like "/package.Service/Method".
+	// Supports wildcards: "/package.Service/*" matches all methods in a service.
 	MethodPricing map[string]PricingRule
 
-	// DefaultPricing is used when no pattern matches (optional)
-	// If nil, unmatched endpoints don't require payment
+	// DefaultPricing is used when no pattern matches.
+	// If nil, unmatched endpoints do not require payment.
 	DefaultPricing *PricingRule
 
-	// ValidityDuration is how long payment requirements are valid
-	// Defaults to 5 minutes
+	// ValidityDuration is how long an advertised payment window lasts.
+	// Defaults to 5 minutes. A caller deadline shorter than this reduces
+	// maxTimeoutSeconds on that challenge.
 	ValidityDuration time.Duration
 
-	// SkipPaths lists paths that should bypass payment checks entirely
-	// Useful for health checks, public endpoints, etc.
+	// MaxBufferBytes caps the HTTP response held until settlement.
+	// Defaults to 1 MiB. A route that can exceed it must set PaymentFlow upfront.
+	MaxBufferBytes int
+
+	// ReceiptStore remembers settled responses keyed by payment-identifier.
+	// Nil selects an in-memory store of 1024 entries.
+	ReceiptStore ReceiptStore
+
+	// Usage is reserved for a later upto meter. Fixed-price routes do not call it.
+	Usage UsageFunc
+
+	// OnExtensionResponses is invoked with facilitator EXTENSION-RESPONSES.
+	OnExtensionResponses ExtensionHook
+
+	// SkipPaths lists paths that bypass payment checks entirely.
 	SkipPaths []string
 
-	// SkipMethods lists gRPC methods that should bypass payment checks
-	// Full method names like "/package.Service/Method"
+	// SkipMethods lists gRPC methods that bypass payment checks.
 	SkipMethods []string
 
-	// CustomPaywallHTML is custom HTML to return for browser requests (optional)
-	// If empty, a JSON 402 response is returned for all clients
+	// CustomPaywallHTML is optional HTML for browser requests.
+	// The PAYMENT-REQUIRED header is still set.
 	CustomPaywallHTML string
 }
 
-// PricingRule defines payment requirements for an endpoint
+// PricingRule defines payment requirements for an endpoint or method.
 type PricingRule struct {
-	// Amount is the payment amount required (e.g., "1.50")
-	Amount string
-
-	// AcceptedTokens lists the currencies/tokens accepted for this endpoint
-	// The client can choose any of these to pay with
+	// AcceptedTokens lists the currencies accepted for this route.
+	// Each token specifies its own Amount in atomic units.
 	AcceptedTokens []TokenRequirement
 
-	// Description explains what this payment is for
+	// Description explains what this payment is for.
 	Description string
 
-	// MimeType of the resource being sold (optional)
+	// MimeType of the resource being sold.
 	MimeType string
 
-	// OutputSchema is a JSON schema describing the response format (optional)
+	// OutputSchema is retained for callers. It is not part of the v2
+	// PaymentRequirements object. Bazaar carries response schemas.
 	OutputSchema map[string]interface{}
+
+	// PaymentFlow is authorization, upfront, or escrow.
+	// The empty string means authorization.
+	PaymentFlow string
+
+	// ResourceURL overrides the absolute URL advertised in resource.url.
+	ResourceURL string
+
+	// ServiceName, Tags, and IconURL are optional resource fields.
+	ServiceName string
+	Tags        []string
+	IconURL     string
+
+	// Extensions are advertised on the challenge. A client may omit a key
+	// or add fields. It must not drop or change a server-supplied info value.
+	Extensions map[string]interface{}
 }
 
-// TokenRequirement specifies a payment option (network + token)
+// TokenRequirement specifies one payment option.
 type TokenRequirement struct {
-	// Network is the blockchain network (e.g., "base-mainnet", "ethereum-mainnet")
+	// Network is the blockchain network in CAIP-2 form (for example "eip155:8453").
 	Network string
 
-	// AssetContract is the token contract address (for ERC-20 tokens)
-	// Use empty string or "0x0" for native currency
+	// AssetContract is the token contract address.
 	AssetContract string
 
-	// Symbol is the token symbol (e.g., "USDC", "DAI", "USDT")
+	// Symbol is the token symbol (for example "USDC").
+	// It is exposed to handlers and logs. It is not written as extra.name.
 	Symbol string
 
-	// Recipient is the address that will receive payment
+	// Recipient is the address that receives payment.
 	Recipient string
 
-	// TokenName is the human-readable token name (optional)
+	// Amount is the price in atomic units.
+	Amount string
+
+	// TokenName is the EIP-712 domain name, exactly as the token's name() returns it.
+	// The exact scheme sends it as extra.name. Base mainnet USDC returns "USD Coin".
+	// Base Sepolia USDC returns "USDC". Symbol is not written here.
 	TokenName string
 
-	// TokenDecimals is the number of decimals for this token (optional, defaults to 18)
+	// TokenVersion is the EIP-712 domain version, exactly as the token's version() returns it.
+	// The exact scheme sends it as extra.version. It is required for exact EIP-3009
+	// and is never defaulted.
+	TokenVersion string
+
+	// TokenDecimals is the number of decimals for this token.
 	TokenDecimals int
+
+	// Scheme defaults to exact.
+	Scheme string
+
+	// AssetTransferMethod is omitted from extra when empty or eip3009.
+	// Other methods (permit2, erc7710) are written to extra.
+	AssetTransferMethod string
 }
 
-// Validate checks if the configuration is valid
+// SchemeName returns the advertised scheme. The empty value means exact.
+func (t TokenRequirement) SchemeName() string {
+	if t.Scheme == "" {
+		return "exact"
+	}
+	return t.Scheme
+}
+
+// Flow returns the route payment flow. The empty value means authorization.
+func (p PricingRule) Flow() string {
+	if p.PaymentFlow == "" {
+		return FlowAuthorization
+	}
+	return p.PaymentFlow
+}
+
+// Validate checks the configuration and fills defaults.
 func (c *Config) Validate() error {
 	if c.Verifier == nil {
 		return fmt.Errorf("verifier is required")
@@ -93,6 +165,10 @@ func (c *Config) Validate() error {
 
 	if c.ValidityDuration == 0 {
 		c.ValidityDuration = 5 * time.Minute
+	}
+
+	if c.MaxBufferBytes <= 0 {
+		c.MaxBufferBytes = DefaultMaxBufferBytes
 	}
 
 	for pattern, rule := range c.EndpointPricing {
@@ -116,10 +192,12 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Validate checks if the pricing rule is valid
+// Validate checks the pricing rule.
 func (p *PricingRule) Validate() error {
-	if p.Amount == "" {
-		return fmt.Errorf("amount is required")
+	switch p.Flow() {
+	case FlowAuthorization, FlowUpfront, FlowEscrow:
+	default:
+		return fmt.Errorf("unsupported payment flow %q", p.PaymentFlow)
 	}
 
 	if len(p.AcceptedTokens) == 0 {
@@ -135,7 +213,9 @@ func (p *PricingRule) Validate() error {
 	return nil
 }
 
-// Validate checks if the token requirement is valid
+// Validate checks the token requirement.
+// exact with EIP-3009 (the default transfer method) requires an EIP-712
+// domain name and version. The version is not defaulted to "2".
 func (t *TokenRequirement) Validate() error {
 	if t.Network == "" {
 		return fmt.Errorf("network is required")
@@ -153,73 +233,58 @@ func (t *TokenRequirement) Validate() error {
 		return fmt.Errorf("asset contract is required")
 	}
 
+	if t.Amount == "" {
+		return fmt.Errorf("amount is required")
+	}
+
+	if t.requiresDomain() {
+		if t.TokenName == "" {
+			return fmt.Errorf("token name is required")
+		}
+		if t.TokenVersion == "" {
+			return fmt.Errorf("token version is required")
+		}
+	}
+
 	return nil
 }
 
-// MatchEndpoint finds the pricing rule for a given path
-// Returns the rule and true if found, nil and false otherwise
+func (t TokenRequirement) requiresDomain() bool {
+	if t.SchemeName() != "exact" {
+		return false
+	}
+	method := strings.ToLower(t.AssetTransferMethod)
+	return method == "" || method == "eip3009"
+}
+
+// MatchEndpoint finds the pricing rule for an HTTP path.
+// Skip paths win, then an exact key, then the longest matching pattern,
+// then default pricing.
 func (c *Config) MatchEndpoint(requestPath string) (*PricingRule, bool) {
-	// Check if path should be skipped
-	for _, skipPath := range c.SkipPaths {
-		if matchPath(requestPath, skipPath) {
-			return nil, false
-		}
-	}
-
-	// First try exact matches
-	if rule, ok := c.EndpointPricing[requestPath]; ok {
-		return &rule, true
-	}
-
-	// Then try wildcard matches
-	// Sort by specificity (longer patterns first)
-	var bestMatch string
-	var bestRule *PricingRule
-
-	for pattern, rule := range c.EndpointPricing {
-		if matchPath(requestPath, pattern) {
-			if len(pattern) > len(bestMatch) {
-				bestMatch = pattern
-				ruleCopy := rule
-				bestRule = &ruleCopy
-			}
-		}
-	}
-
-	if bestRule != nil {
-		return bestRule, true
-	}
-
-	// Finally, use default if configured
-	if c.DefaultPricing != nil {
-		return c.DefaultPricing, true
-	}
-
-	return nil, false
+	return matchRule(requestPath, c.SkipPaths, c.EndpointPricing, c.DefaultPricing)
 }
 
-// MatchMethod finds the pricing rule for a given gRPC method
-// Returns the rule and true if found, nil and false otherwise
+// MatchMethod finds the pricing rule for a gRPC full method name.
 func (c *Config) MatchMethod(fullMethod string) (*PricingRule, bool) {
-	// Check if method should be skipped
-	for _, skipMethod := range c.SkipMethods {
-		if matchPath(fullMethod, skipMethod) {
+	return matchRule(fullMethod, c.SkipMethods, c.MethodPricing, c.DefaultPricing)
+}
+
+func matchRule(key string, skips []string, rules map[string]PricingRule, def *PricingRule) (*PricingRule, bool) {
+	for _, skip := range skips {
+		if matchPath(key, skip) {
 			return nil, false
 		}
 	}
 
-	// First try exact matches
-	if rule, ok := c.MethodPricing[fullMethod]; ok {
+	if rule, ok := rules[key]; ok {
 		return &rule, true
 	}
 
-	// Then try wildcard matches
-	// Sort by specificity (longer patterns first)
 	var bestMatch string
 	var bestRule *PricingRule
 
-	for pattern, rule := range c.MethodPricing {
-		if matchPath(fullMethod, pattern) {
+	for pattern, rule := range rules {
+		if matchPath(key, pattern) {
 			if len(pattern) > len(bestMatch) {
 				bestMatch = pattern
 				ruleCopy := rule
@@ -232,29 +297,23 @@ func (c *Config) MatchMethod(fullMethod string) (*PricingRule, bool) {
 		return bestRule, true
 	}
 
-	// Finally, use default if configured
-	if c.DefaultPricing != nil {
-		return c.DefaultPricing, true
+	if def != nil {
+		return def, true
 	}
 
 	return nil, false
 }
 
-// matchPath checks if a request path matches a pattern
-// Supports wildcards: /v1/* matches /v1/foo, /v1/foo/bar, etc.
 func matchPath(requestPath, pattern string) bool {
-	// Exact match
 	if requestPath == pattern {
 		return true
 	}
 
-	// Wildcard match
 	if strings.HasSuffix(pattern, "/*") {
 		prefix := strings.TrimSuffix(pattern, "/*")
 		return strings.HasPrefix(requestPath, prefix+"/") || requestPath == prefix
 	}
 
-	// Use path.Match for more complex patterns
 	matched, _ := path.Match(pattern, requestPath)
 	return matched
 }
